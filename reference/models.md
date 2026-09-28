@@ -17,7 +17,7 @@
 | Qwen2.5-32B | 64 | 5120 | (128) | 64 | 27648 | 0 | 40/8 | 32.76 | 32.76 | 4096 | 1,2,4,8,16,32,64 |
 | Qwen2.5-72B | 80 | 8192 | (128) | 80 | 29568 | 0 | 64/8 | 72.7 | 72.7 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
 | Qwen3-8B | 36 | 4096 | (128) | 36 | 11008 | 0 | 32/8 | 8.04 | 8.04 | 4096 | 1,2,3,4,6,9,12,18,36 |
-| Qwen3-32B | 64 | 5120 | (80) | 64 | 25600 | 0 | 64/8 | 30.5 | 30.5 | 4096 | 1,2,4,8,16,32,64 |
+| Qwen3-32B | 64 | 5120 | **128** | 64 | 25600 | 0 | 64/8 | 30.5 | 30.5 | 4096 | 1,2,4,8,16,32,64 |
 | Qwen3-30B-A3B | 48 | 2048 | **128** | 0 | 6144 | 768 | 32/4 | 30.53 | 3.35 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
 | Qwen3-235B-A22B | 94 | 4096 | **128** | 0 | 12288 | 1536 | 64/4 | 235.09 | 22.19 | 4096 | 1,2,47,94 |
 | Qwen3.5-27B | 64 | 5120 | **256** | 64 | 17408 | 0 | 24/4 | 24.35 | 24.35 | 4096 | 1,2,4,8,16,32,64 |
@@ -37,7 +37,20 @@ This distinction is load-bearing. The Qwen3 and Qwen3.5 MoE models decouple `hea
 
 So when you write a custom variant, or copy a row from this table into a `--json` file, **carry `head_dim` across explicitly** for any model where it is bold. Omitting it silently produces a 2x error in attention memory, with no warning.
 
-Note on reading this table: reconciliation here means the stored parameter counts agree with the engine's own formula given these inputs. It does not mean each value has been checked against the model's published architecture. `Qwen3-32B` is worth treating with care in particular — its stored value is self-consistent with a derived `head_dim` of 80, but published Qwen3 dense models use 128, so it may be understated. Verify against the model card before relying on it.
+All `head_dim` values in the table above are verified against the published `config.json` for each model family, not inferred from the stored parameter counts.
+
+### Qwen3.5 is a hybrid-attention family, and the calculator does not model that
+
+This is the most important limitation in the catalog. `Qwen/Qwen3.5-27B/config.json` declares a **3:1 hybrid attention stack**: `full_attention_interval: 4`, with three Gated DeltaNet `linear_attention` layers for every one `full_attention` layer. Across 64 layers that is **16 full-attention layers and 48 linear-attention layers**, the linear ones carrying their own shapes (`linear_key_head_dim: 128`, `linear_num_key_heads: 16`, `linear_num_value_heads: 48`).
+
+The calculator treats every layer as standard full attention. Two consequences:
+
+1. **Attention memory is overstated.** `attn_per_layer` is applied to all 64 layers when only 16 of them have full-attention projections.
+2. **Long-context training time is overstated more severely.** The Phase 3 attention term is O(seq_len²) and is applied to every layer, but linear attention is O(seq_len). At 32K context the error compounds badly.
+
+Two further mismatches: Qwen3.5 uses `vocab_size: 248320`, not the 151,936 default in `project_config.py`, and the models are multimodal (`Qwen3_5ForConditionalGeneration`, with a `vision_config`), which the calculator does not account for at all.
+
+Treat Qwen3.5 numbers as an upper bound on attention cost rather than an estimate, and say so when reporting them.
 
 Notes on reading this table:
 
