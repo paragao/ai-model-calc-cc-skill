@@ -31,7 +31,7 @@ The G family is for inference and small-scale fine-tuning, not large distributed
 
 Two cautions when you do:
 
-1. The Phase 5 and Phase 6 communication models **assume 8 GPUs per node** and do not read GPU density from hardware entries. At GB200's 4 GPUs per node, the intra-node versus inter-node boundary — and therefore the NVLink-versus-EFA decision — is computed wrongly. Report that caveat alongside any GB200 result.
+1. GPUs per node is derived as `gpus / nodes`, and that ratio decides whether pipeline and expert traffic is priced as NVLink or EFA — roughly three orders of magnitude apart per send. For GB200 set `nodes` so the ratio comes out at 4 (for example `gpus: 72, nodes: 18`). If `nodes` is missing or zero the engine assumes 8 per node, which would misprice it badly.
 2. GB200 is sold as UltraServers. A single UltraServer is a 36 or 72 GPU configuration; larger counts are multiple UltraServers joined over EFA, which changes the bandwidth picture the model does not capture.
 
 ## Defining custom hardware

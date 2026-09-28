@@ -65,7 +65,7 @@ The calculator is a planning instrument, not a benchmark. Numbers are estimates 
 
 Two specifics worth knowing:
 
-- The Phase 5 and Phase 6 communication models assume **8 GPUs per node** and do not read density from hardware entries, so platforms like GB200 NVL (4 per node) get the intra-node versus inter-node boundary wrong.
+- GPUs per node is derived from each hardware entry as `gpus / nodes`, and that ratio decides whether pipeline and expert traffic is priced as NVLink or EFA — about three orders of magnitude apart per send. Set `nodes` correctly in custom hardware files.
 - `p6e-gb200`/GB200 NVL is **not** a built-in hardware preset and must be supplied via `--hardware`.
 
 ## Related

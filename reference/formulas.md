@@ -104,7 +104,7 @@ exposed_sends         = 2 * (PP - 1)        # warmup fwd + cooldown bwd
 estimated_pp_time_ms  = exposed_sends * time_per_send_us / 1000
 ```
 
-**Communication type** is decided by `is_inter_node = PP > gpus_per_node`, where **`gpus_per_node` defaults to 8 and is not read from the hardware entry**. On a platform with different density, such as GB200 NVL at 4 GPUs per node, this boundary is wrong and so is the resulting NVLink-versus-EFA choice.
+**Communication type** is decided by `is_inter_node = PP > gpus_per_node`, where `gpus_per_node` is derived from the hardware entry as `gpus / nodes`, falling back to 8 when `nodes` is missing or zero. On GB200 NVL at 4 GPUs per node this means `PP > 4` already crosses the node boundary, where on an 8-per-node platform it would not.
 
 **Effective bandwidth:**
 
