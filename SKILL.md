@@ -94,7 +94,8 @@ Flag when a result sits close to the memory ceiling. The fragmentation factor is
 - GPUs per node is derived from each hardware entry as `gpus / nodes`, and decides whether pipeline (Phase 6) and expert (Phase 5) traffic is priced as intra-node NVLink or inter-node EFA. The two differ by roughly three orders of magnitude per send, so the `nodes` value in a custom hardware file matters a great deal — get it right. If `nodes` is absent or zero, the engine falls back to assuming 8 per node.
 - Activation memory is not divided by TP, which is deliberately conservative.
 - `p6e-gb200`/GB200 NVL is **not** a built-in preset despite appearing in some documentation. Supply it via `--hardware`, with `nodes` set so that `gpus / nodes` is 4.
-- Several built-in variants carry stored `attn_per_layer` values that match neither the head-based formula nor the documented `d² × 2.25` fallback, so the same model can give different memory numbers via `--model` than via an equivalent `--json` file. Prefer `--model` for the built-in catalog.
+- Several built-in variants decouple `head_dim` from `d / q_heads` (the Qwen3 and Qwen3.5 MoE models use 128 or 256). When writing a custom variant, set `head_dim` explicitly — letting it default silently halves attention parameters on those architectures. See `reference/models.md`.
+- The four DeepSeek variants use Multi-head Latent Attention, so their stored attention parameters are not reproducible from the generic Q/K/V/O formula. That is expected, not an error.
 
 ## Reference files
 

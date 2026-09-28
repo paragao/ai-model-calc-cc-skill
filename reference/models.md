@@ -4,30 +4,40 @@
 
 22 variants ship in `configuration/variants_config.py`. Select one with `--model NAME` (case-insensitive, exact match).
 
-| Name | Layers | d | Dense layers | dense_ffn | expert_ffn | q/kv heads | Total B | Active B | seq_len | valid_pp |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Llama-3.1-8B | 32 | 4096 | 32 | 14336 | 0 | 32/8 | 8.03 | 8.03 | 4096 | 1,2,4,8,16,32 |
-| Llama-3.1-70B | 80 | 8192 | 80 | 28672 | 0 | 64/8 | 70.6 | 70.6 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
-| Llama-3.1-405B | 126 | 16384 | 126 | 53248 | 0 | 128/8 | 405.0 | 405.0 | 4096 | 1,2,3,6,7,9,14,18,21,42,63,126 |
-| Llama-3.2-3B | 28 | 3072 | 28 | 8192 | 0 | 24/8 | 3.21 | 3.21 | 4096 | 1,2,4,7,14,28 |
-| Llama-3.3-70B | 80 | 8192 | 80 | 28672 | 0 | 64/8 | 70.6 | 70.6 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
-| Llama-4-Scout-17B-16E | 48 | 5120 | 0 | 16384 | 8192 | 40/8 | 109.0 | 17.0 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
-| Llama-4-Maverick-17B-128E | 48 | 5120 | 24 | 16384 | 8192 | 40/8 | 400.0 | 17.0 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
-| Qwen2.5-7B | 28 | 3584 | 28 | 18944 | 0 | 28/4 | 7.62 | 7.62 | 4096 | 1,2,4,7,14,28 |
-| Qwen2.5-32B | 64 | 5120 | 64 | 27648 | 0 | 40/8 | 32.76 | 32.76 | 4096 | 1,2,4,8,16,32,64 |
-| Qwen2.5-72B | 80 | 8192 | 80 | 29568 | 0 | 64/8 | 72.7 | 72.7 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
-| Qwen3-8B | 36 | 4096 | 36 | 11008 | 0 | 32/8 | 8.04 | 8.04 | 4096 | 1,2,3,4,6,9,12,18,36 |
-| Qwen3-32B | 64 | 5120 | 64 | 25600 | 0 | 64/8 | 30.5 | 30.5 | 4096 | 1,2,4,8,16,32,64 |
-| Qwen3-30B-A3B | 48 | 2048 | 0 | 6144 | 768 | 32/4 | 30.53 | 3.35 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
-| Qwen3-235B-A22B | 94 | 4096 | 0 | 12288 | 1536 | 64/4 | 235.09 | 22.19 | 4096 | 1,2,47,94 |
-| Qwen3.5-27B | 64 | 5120 | 64 | 17408 | 0 | 24/4 | 24.35 | 24.35 | 4096 | 1,2,4,8,16,32,64 |
-| Qwen3.5-35B-A3B | 40 | 2048 | 0 | 0 | 512 | 16/2 | 34.13 | 2.93 | 4096 | 1,2,4,5,8,10,20,40 |
-| Qwen3.5-122B-A10B | 48 | 3072 | 0 | 0 | 1024 | 32/2 | 120.55 | 8.21 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
-| Qwen3.5-397B-A17B | 60 | 4096 | 0 | 0 | 1024 | 32/2 | 393.74 | 14.74 | 4096 | 1,2,3,4,5,6,10,12,15,20,30,60 |
-| DeepSeek-V3 | 61 | 7168 | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
-| DeepSeek-V3.1 | 61 | 7168 | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
-| DeepSeek-V3.2 | 61 | 7168 | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
-| DeepSeek-V4 | 61 | 7168 | 0 | 3072 | 3072 | 128/1 | 1600.0 | 49.0 | 4096 | 1,61 |
+| Name | Layers | d | head_dim | Dense layers | dense_ffn | expert_ffn | q/kv heads | Total B | Active B | seq_len | valid_pp |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Llama-3.1-8B | 32 | 4096 | (128) | 32 | 14336 | 0 | 32/8 | 8.03 | 8.03 | 4096 | 1,2,4,8,16,32 |
+| Llama-3.1-70B | 80 | 8192 | (128) | 80 | 28672 | 0 | 64/8 | 70.6 | 70.6 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
+| Llama-3.1-405B | 126 | 16384 | (128) | 126 | 53248 | 0 | 128/8 | 405.0 | 405.0 | 4096 | 1,2,3,6,7,9,14,18,21,42,63,126 |
+| Llama-3.2-3B | 28 | 3072 | (128) | 28 | 8192 | 0 | 24/8 | 3.21 | 3.21 | 4096 | 1,2,4,7,14,28 |
+| Llama-3.3-70B | 80 | 8192 | (128) | 80 | 28672 | 0 | 64/8 | 70.6 | 70.6 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
+| Llama-4-Scout-17B-16E | 48 | 5120 | (128) | 0 | 16384 | 8192 | 40/8 | 109.0 | 17.0 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
+| Llama-4-Maverick-17B-128E | 48 | 5120 | (128) | 24 | 16384 | 8192 | 40/8 | 400.0 | 17.0 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
+| Qwen2.5-7B | 28 | 3584 | (128) | 28 | 18944 | 0 | 28/4 | 7.62 | 7.62 | 4096 | 1,2,4,7,14,28 |
+| Qwen2.5-32B | 64 | 5120 | (128) | 64 | 27648 | 0 | 40/8 | 32.76 | 32.76 | 4096 | 1,2,4,8,16,32,64 |
+| Qwen2.5-72B | 80 | 8192 | (128) | 80 | 29568 | 0 | 64/8 | 72.7 | 72.7 | 4096 | 1,2,4,5,8,10,16,20,40,80 |
+| Qwen3-8B | 36 | 4096 | (128) | 36 | 11008 | 0 | 32/8 | 8.04 | 8.04 | 4096 | 1,2,3,4,6,9,12,18,36 |
+| Qwen3-32B | 64 | 5120 | (80) | 64 | 25600 | 0 | 64/8 | 30.5 | 30.5 | 4096 | 1,2,4,8,16,32,64 |
+| Qwen3-30B-A3B | 48 | 2048 | **128** | 0 | 6144 | 768 | 32/4 | 30.53 | 3.35 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
+| Qwen3-235B-A22B | 94 | 4096 | **128** | 0 | 12288 | 1536 | 64/4 | 235.09 | 22.19 | 4096 | 1,2,47,94 |
+| Qwen3.5-27B | 64 | 5120 | **256** | 64 | 17408 | 0 | 24/4 | 24.35 | 24.35 | 4096 | 1,2,4,8,16,32,64 |
+| Qwen3.5-35B-A3B | 40 | 2048 | **256** | 0 | 0 | 512 | 16/2 | 34.13 | 2.93 | 4096 | 1,2,4,5,8,10,20,40 |
+| Qwen3.5-122B-A10B | 48 | 3072 | **256** | 0 | 0 | 1024 | 32/2 | 120.55 | 8.21 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
+| Qwen3.5-397B-A17B | 60 | 4096 | **256** | 0 | 0 | 1024 | 32/2 | 393.74 | 14.74 | 4096 | 1,2,3,4,5,6,10,12,15,20,30,60 |
+| DeepSeek-V3 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
+| DeepSeek-V3.1 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
+| DeepSeek-V3.2 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
+| DeepSeek-V4 | 61 | 7168 | (56) | 0 | 3072 | 3072 | 128/1 | 1600.0 | 49.0 | 4096 | 1,61 |
+
+### head_dim matters, and the default is often wrong
+
+A **bold** `head_dim` is stored explicitly on the variant. A `(parenthesised)` value is not stored — it is what the engine derives as `d // q_heads`.
+
+This distinction is load-bearing. The Qwen3 and Qwen3.5 MoE models decouple `head_dim` from `d / q_heads`: Qwen3-235B-A22B has `d=4096` and `q_heads=64`, so the default would give 64, but the real value is 128. Deriving it wrongly **halves** the computed attention parameters per layer.
+
+So when you write a custom variant, or copy a row from this table into a `--json` file, **carry `head_dim` across explicitly** for any model where it is bold. Omitting it silently produces a 2x error in attention memory, with no warning.
+
+Note on reading this table: reconciliation here means the stored parameter counts agree with the engine's own formula given these inputs. It does not mean each value has been checked against the model's published architecture. `Qwen3-32B` is worth treating with care in particular — its stored value is self-consistent with a derived `head_dim` of 80, but published Qwen3 dense models use 128, so it may be understated. Verify against the model card before relying on it.
 
 Notes on reading this table:
 
