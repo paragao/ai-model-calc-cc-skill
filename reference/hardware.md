@@ -9,30 +9,37 @@
 | p5 | 8 | 80 GB | 400 | 900 | 989 | 64,128,256,512 |
 | p5en | 8 | 141 GB | 400 | 900 | 989 | 64,128,256,512 |
 | p6-b200 | 8 | 180 GB | 400 | 1800 | 2250 | 64,128,256,512 |
-| p6-b300 | 8 | 268 GB | 800 | 1800 | 3375 | 64,128,256,512 |
-| g5 | 8 | 24 GB | 100 | 600 | 35 | 1,4,8,16 |
-| g6 | 8 | 24 GB | 100 | 64 | 121 | 1,4,8,16 |
+| p6-b300 | 8 | 268 GB | 800 | 1800 | 2250 | 64,128,256,512 |
+| p6e-gb200 | **72** | 186 GB | 3600 | 1800 | 2500 | 1,2,4,8 |
+| g5 | 8 | 24 GB | 12.5 | 64 | 35 | 1,4,8,16 |
+| g6 | 8 | 24 GB | 12.5 | 64 | 121 | 1,4,8,16 |
 | g6e | 8 | 48 GB | 50 | 64 | 366 | 1,4,8,16 |
+
+Bandwidth columns are both in **GB/s** (divide an advertised Gbps figure by 8). BF16 figures are **dense, without sparsity**; intra-node figures are NVLink bidirectional totals.
 
 Instance mapping and interconnect:
 
-- **p5.48xlarge** — H100 SXM, 3200 Gbps EFA, NVSwitch intra-node
-- **p5en.48xlarge** — H200 SXM, 3200 Gbps EFAv3
-- **p6-b200.48xlarge** — B200, 3200 Gbps EFAv4, NVLink5
-- **p6-b300.48xlarge** — B300 Ultra, 6400 Gbps EFAv4, NVLink5
-- **g5.48xlarge** — A10G, NVLink pairs only, not a full mesh, ENA networking
-- **g6.48xlarge** / **g6e.48xlarge** — L4 / L40S, PCIe-connected with no NVLink, ENA networking
+- **p5.48xlarge** — H100 SXM, 3200 Gbps EFA = 400 GB/s, NVSwitch intra-node
+- **p5en.48xlarge** — H200 SXM, 3200 Gbps EFAv3 = 400 GB/s
+- **p6-b200.48xlarge** — B200, 3200 Gbps EFAv4 = 400 GB/s, NVLink5
+- **p6-b300.48xlarge** — B300 Ultra, 6400 Gbps EFAv4 = 800 GB/s, NVLink5. **BF16 is 2250, the same as B200** — Blackwell Ultra's 1.5x uplift is FP4 only, and AWS qualifies it as "1.5x GPU TFLOPS (at FP4, without sparsity)". Do not scale the BF16 figure by 1.5.
+- **p6e-gb200 UltraServer** — GB200 NVL72. A **node is one UltraServer**: `u-p6e-gb200x72` is 18 × `p6e-gb200.36xlarge` (4 GPUs each) = 72 GPUs in **one NVLink domain**, so `gpus_per_node` is 72 and a PP of up to 72 stays on NVLink. Per UltraServer, 28800 Gbps EFAv4 = 3600 GB/s, which is 50 GB/s per GPU — the same ratio as p5.
+- **g5.48xlarge** — A10G, **no NVLink**: AWS provisions G5 GPUs in PCIe pass-through mode. ENA 100 Gbps = 12.5 GB/s.
+- **g6.48xlarge** / **g6e.48xlarge** — L4 / L40S, PCIe-connected with no NVLink, ENA networking. G6 100 Gbps = 12.5 GB/s, G6e 400 Gbps = 50 GB/s.
 
-The G family is for inference and small-scale fine-tuning, not large distributed training. Its low intra-node bandwidth makes tensor parallelism expensive.
+The G family is for inference and small-scale fine-tuning, not large distributed training. Its low intra-node bandwidth makes tensor parallelism expensive. These entries assume the `.48xlarge` size (8 GPUs) — smaller sizes have 1 or 4 GPUs and lower network bandwidth, so supply those via `--hardware`.
 
-## Not built in
+## GB200 node modelling (superseded)
 
 `p6e-gb200.36xlarge` (GB200 NVL, 185 GB per GPU, 2500 peak BF16 TFLOPS, **4 GPUs per node**) is **not** a preset, despite appearing in some project documentation. Supply it via `--hardware`.
 
-Two cautions when you do:
+## GB200 node modelling
 
-1. GPUs per node is derived as `gpus / nodes`, and that ratio decides whether pipeline and expert traffic is priced as NVLink or EFA — roughly three orders of magnitude apart per send. For GB200 set `nodes` so the ratio comes out at 4 (for example `gpus: 72, nodes: 18`). If `nodes` is missing or zero the engine assumes 8 per node, which would misprice it badly.
-2. GB200 is sold as UltraServers. A single UltraServer is a 36 or 72 GPU configuration; larger counts are multiple UltraServers joined over EFA, which changes the bandwidth picture the model does not capture.
+`p6e-gb200` **is now a built-in preset** — select `1`, `2`, `4` or `8 p6e-gb200` (72, 144, 288, 576 GPUs). Earlier revisions of this skill said it was not a preset and told you to set `nodes` so that `gpus / nodes` came out at 4. **That was wrong** and would misprice the workload badly.
+
+GPUs per node is derived as `gpus / nodes`, and that ratio decides whether pipeline and expert traffic is priced as NVLink or EFA — roughly three orders of magnitude apart per send. For GB200 the correct ratio is **72**, not 4: `u-p6e-gb200x72` is 18 × `p6e-gb200.36xlarge` (4 GPUs each), but all 72 GPUs share **one NVLink domain**, so a PP of up to 72 stays on NVLink. Modelling a node as the 4-GPU instance pushes any `PP > 4` onto EFA, which is roughly 36× slower per send.
+
+If you do need a custom GB200 size, set `gpus` to 72 × the UltraServer count and `nodes` to the UltraServer count. If `nodes` is missing or zero the engine falls back to 8 per node, which is wrong for this platform.
 
 ## Defining custom hardware
 

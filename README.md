@@ -44,7 +44,7 @@ The skill will ask which of three questions you are really asking — how many i
 
 Six analysis phases: per-GPU memory across ZeRO stages, batch configuration, training time, ZeRO communication, MoE all-to-all routing, and pipeline send/recv.
 
-22 built-in model variants across Llama 3.1/3.2/3.3, Llama 4, Qwen 2.5/3/3.5 and DeepSeek V3–V4. 28 built-in hardware presets across p5, p5en, p6-b200, p6-b300, g5, g6 and g6e. Custom models and clusters are supplied as JSON.
+22 built-in model variants across Llama 3.1/3.2/3.3, Llama 4, Qwen 2.5/3/3.5 and DeepSeek V3–V4. 32 built-in hardware presets across p5, p5en, p6-b200, p6-b300, p6e-gb200, g5, g6 and g6e. Custom models and clusters are supplied as JSON.
 
 ## Structure
 
@@ -66,7 +66,7 @@ The calculator is a planning instrument, not a benchmark. Numbers are estimates 
 Two specifics worth knowing:
 
 - GPUs per node is derived from each hardware entry as `gpus / nodes`, and that ratio decides whether pipeline and expert traffic is priced as NVLink or EFA — about three orders of magnitude apart per send. Set `nodes` correctly in custom hardware files.
-- `p6e-gb200`/GB200 NVL is **not** a built-in hardware preset and must be supplied via `--hardware`.
+- `p6e-gb200`/GB200 NVL72 **is** a built-in preset (`1`, `2`, `4`, `8 p6e-gb200` = 72, 144, 288, 576 GPUs). A node is one UltraServer: 72 GPUs in a single NVLink domain.
 
 ## Related
 
