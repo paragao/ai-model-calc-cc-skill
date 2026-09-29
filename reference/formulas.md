@@ -9,6 +9,8 @@ Throughout: `d` is hidden dimension, `DP = gpus / (TP * PP * CP)`, and `PARAM_BY
 Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
 
 - **Model parameters**: `(attn + FFN + expert + embed) * PARAM_BYTES / (TP * PP) + (ln + router) * PARAM_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Divided further by DP under ZeRO-3.
+  - `expert` is `experts_per_gpu * expert_each`, and `experts_per_gpu` comes from the variant's own `num_experts // EP` when it declares one, falling back to the global `N_EXPERTS // EP` otherwise. The fallback is wrong by 8x for a 16-expert model and 4x for a 512-expert one.
+  - `embed` counts **two** tables (input embedding + LM head) by default, or **one** when the variant sets `tied_embeddings: True`, where the LM head IS the input embedding matrix.
 - **Gradients**: same size as model parameters per GPU. Sharded under ZeRO-2 and ZeRO-3.
 - **Optimizer states**: split by EP and DP — `model_mem * dense_frac * OPTIM_BYTES / DP + model_mem * moe_frac * OPTIM_BYTES / eff_dp_moe`, where `eff_dp_moe = DP / EP` when `DP > EP`, else `DP`. This models the fact that expert parameters are shared only within the EP group.
 - **Activations**, MoE-aware per layer:
@@ -45,6 +47,8 @@ total_flops     = linear_flops + attention_flops
 ```
 
 The factor 6 is one forward plus two backward passes. `ATTENTION_FLOPS_FACTOR` is 12, covering the QK^T and softmax·V matmuls across forward and backward that `6ND` omits. Per sequence that cost is `factor * layers * seq_len² * d`; across `TOTAL_TOKENS / seq_len` sequences it reduces to the form above, which is **linear in `seq_len`**. So at a fixed token budget a 32K-context run costs more attention FLOPs than a 4K one. The term is skipped entirely if any of `layers`, `d`, `seq_len` or the factor is zero.
+
+`layers` here is the count of **full-attention** layers, not all layers. A hybrid model declaring `full_attention_interval: N` contributes `layers // N` (Qwen3.5: 16 of 64), because its other layers use linear attention, which is O(seq_len) and is already covered by the `6ND` term. A variant without that field contributes every layer.
 
 **Time:**
 

@@ -10,12 +10,12 @@ These parameters have **no CLI flags**. To change them you must edit the files. 
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `VOCAB` | 151,936 | Vocabulary size. Qwen3 default; Llama = 128,256, Qwen2.5 = 152,064, DeepSeek = 129,280. |
+| `VOCAB` | 151,936 | Vocabulary size. **Fallback only** — every built-in carries its own `vocab`. Qwen3 = 151,936, Llama-3.x = 128,256, Llama-4 = 202,048, Qwen2.5 = 152,064, Qwen3.5 = 248,320, DeepSeek = 129,280. |
 | `SEQ_LEN` | 4,096 | Sequence length. Used only when a variant does not set its own `seq_len`. |
-| `TOPK` | 8 | Experts routed per token. Set 0 for dense. |
-| `N_EXPERTS` | 128 | Total experts per MoE layer. Set 0 for dense. Overridden per variant by `num_experts`. |
+| `TOPK` | 8 | Experts routed per token. **Fallback only** — overridden per variant by `topk`. Llama-4 routes to 1. |
+| `N_EXPERTS` | 128 | Total experts per MoE layer. **Fallback only** — overridden per variant by `num_experts`. |
 
-Set `VOCAB` to match the model being analyzed. Leaving it at the Qwen3 value while analyzing Llama misprices the embedding and output layers.
+These four are fallbacks, not settings to tune per model: a catalogued variant's own value wins, so editing them changes nothing for the built-ins. Set them only when supplying a `--json` variant that omits the fields, or when analyzing **DeepSeek-V4**, the one built-in with no per-variant values (and no public config to verify any).
 
 ### Parallelism
 
