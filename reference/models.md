@@ -43,21 +43,25 @@ All `head_dim` values in the table above are verified against the published `con
 
 This is the most important limitation in the catalog. `Qwen/Qwen3.5-27B/config.json` declares a **3:1 hybrid attention stack**: `full_attention_interval: 4`, with three Gated DeltaNet `linear_attention` layers for every one `full_attention` layer. Across 64 layers that is **16 full-attention layers and 48 linear-attention layers**, the linear ones carrying their own shapes (`linear_key_head_dim: 128`, `linear_num_key_heads: 16`, `linear_num_value_heads: 48`).
 
-The calculator treats every layer as standard full attention. Two consequences:
+The calculator treats every layer as standard full attention for MEMORY, but no longer for FLOPs:
 
-1. **Attention memory is overstated.** `attn_per_layer` is applied to all 64 layers when only 16 of them have full-attention projections.
-2. **Long-context training time is overstated more severely.** The Phase 3 attention term is O(seq_len²) and is applied to every layer, but linear attention is O(seq_len). At 32K context the error compounds badly.
+1. **Attention memory is still overstated.** `attn_per_layer` is applied to all 64 layers when only 16 have full-attention projections. The overstatement is modest rather than 4x: a linear-attention layer's Gated DeltaNet projections (`linear_num_key_heads` 16 × 128, `linear_num_value_heads` 32-64 × 128) come to roughly **86%** of a full-attention layer, so these layers are not cheap — they are merely cheaper.
+2. **Long-context training time is now correct.** The Phase 3 O(seq_len²) term counts only full-attention layers, via the variant's `full_attention_interval: 4`. It previously applied to every layer, overstating time by 8% at 4K, 54% at 32K and 141% at 128K.
 
-Two further mismatches: Qwen3.5 uses `vocab_size: 248320`, not the 151,936 default in `project_config.py`, and the models are multimodal (`Qwen3_5ForConditionalGeneration`, with a `vision_config`), which the calculator does not account for at all.
+Qwen3.5 carries `vocab: 248320` per variant now, so there is no global to adjust. The models are multimodal (`Qwen3_5ForConditionalGeneration`, with a `vision_config`), which this text-only calculator does not account for — so published parameter totals sit above what it computes.
 
-Treat Qwen3.5 numbers as an upper bound on attention cost rather than an estimate, and say so when reporting them.
+Treat Qwen3.5 attention **memory** as an upper bound and say so when reporting it. Its **time** estimate is sound.
 
 Notes on reading this table:
 
 - `Active B` is what drives training-time FLOPs; `Total B` drives memory. For MoE they differ sharply.
 - `valid_pp` lists the pipeline-parallel degrees that divide `layers` evenly. A `PP` outside this list fails validation. DeepSeek at 61 layers is prime, so only `PP=1` or `PP=61` are valid.
 - All built-ins default to `seq_len` 4096. Override per variant in a `--json` file for long-context work.
-- The built-ins do not set a per-variant expert count; MoE expert count comes from the project-level `N_EXPERTS` in `configuration/project_config.py`. A custom variant can override it with `num_experts`.
+- **Built-ins now carry their own `vocab`, `num_experts` and `topk`, which override the globals in `configuration/project_config.py`.** Editing `VOCAB`, `N_EXPERTS` or `TOPK` has no effect on a catalogued model. They remain the fallback for a `--json` variant that omits the fields, and for **DeepSeek-V4**, which deliberately carries none because no public config exists to verify it against.
+- Expert counts matter more than they look: routed memory is `experts_per_gpu * expert_each`, so falling back to the global 128 overstates a 16-expert model (Llama-4-Scout) 8x and understates a 512-expert one (Qwen3.5-397B) 4x.
+- `Total B` for the Llama-4 and Qwen3.5 rows is the **published multimodal** figure. This calculator models text only, so its computed totals sit slightly below: Scout 107.8B computed + 0.87B vision tower = 108.6B against 109.0 published.
+- Both Llama-4 variants carry a **shared expert on every MoE layer**, sized at the expert FFN (`3 × 5120 × 8192 = 125,829,120`) — not at `intermediate_size_mlp`. `intermediate_size_mlp: 16384` is vestigial for Scout, whose `interleave_moe_layer_step: 1` makes all 48 layers MoE.
+- **Llama-3.2-3B ties its embeddings** (`tied_embeddings: True`) — the only variant that does. Its LM head IS the input embedding matrix.
 
 ## Defining a custom model
 
@@ -75,8 +79,12 @@ Accepted shapes: a `{"variants": [...]}` wrapper, a bare list `[{...}]`, or a si
 
 **Optional:**
 
-- `head_dim` — defaults to `d // q_heads`
-- `num_experts` (or `n_experts`) — per-variant expert count, else project-level `N_EXPERTS`
+- `head_dim` — defaults to `d // q_heads`. **Supply it explicitly for any Qwen3 MoE or Qwen3.5 model**, which decouple it from `d / q_heads` (128 and 256 respectively); the default is 2x low there.
+- `vocab` — per-variant vocabulary, else project-level `VOCAB` (correct for Qwen3 only)
+- `tied_embeddings` — `True` when the LM head IS the input embedding matrix, so one table is counted instead of two. Overstates the model by ~12% on a 3B model if missed.
+- `num_experts` (or `n_experts`) — per-variant expert count, else project-level `N_EXPERTS`. Drives routed memory directly, so the global fallback can be wrong by 8x.
+- `topk` — per-variant routing width, else project-level `TOPK`
+- `full_attention_interval` — for a hybrid model interleaving linear attention, 1 full-attention layer per N (Qwen3.5 uses 4). Keeps the O(seq_len²) FLOPs term on full-attention layers only. Omit for uniform attention.
 - `shared_each` — set above 0 to mark a shared-expert MoE
 - `seq_len` — per-variant context length, else project-level `SEQ_LEN`
 
