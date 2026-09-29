@@ -74,9 +74,10 @@ The six phases:
 
 1. **Memory** — per-GPU breakdown across ZeRO stages, MoE-aware, including dispatch buffers, VP activation overhead and a 1.24x fragmentation factor.
 2. **Batch** — micro batch size and gradient accumulation.
-3. **Training time** — wall-clock with a low/high range, split into compute, pipeline bubble and exposed communication.
-4. **ZeRO communication** — reduce-scatter (ZeRO-2) and all-gather (ZeRO-1).
-5. **MoE all-to-all** — expert token routing.
+3. **Training time** — wall-clock with a low/high range, split into compute, pipeline bubble and exposed communication, at BF16 or FP8 throughput.
+4. **ZeRO communication** — reduce-scatter (ZeRO-2) and all-gather (ZeRO-1), one parameter replica per rank each.
+4.2. **ZeRO-3 communication** — two parameter all-gathers plus the gradient reduce-scatter: 3*Psi per step, 1.5x baseline DP.
+5. **MoE all-to-all** — expert token routing, counting both dispatch and combine.
 6. **PP SendRecv** — pipeline point-to-point cost, NVLink vs EFA, bubble percentage.
 
 If a run fails validation, check that `PP` divides the model's `layers` evenly, that `EP` divides the expert count evenly, and that the cluster's `gpus` is divisible by `TP * PP * CP`.
@@ -84,6 +85,8 @@ If a run fails validation, check that `PP` divides the model's `layers` evenly, 
 ## Interpreting results
 
 Report the configuration that fits, not just the fastest number. State the ZeRO stage and micro batch size a result depends on — a faster configuration that needs ZeRO-3 is a different operational proposition from one that fits at ZeRO-1.
+
+**Do not treat ZeRO-3 as strictly better than ZeRO-2.** It shards resident parameters, but a sharded layer cannot execute, so each module is all-gathered whole into a transient buffer before it runs. That buffer does **not** shrink with DP, so past roughly DP=32 it exceeds the resident shard it replaced, and for a small model at large DP it can cost more memory than the sharding saves. Read the `AGbuf` column, and note ZeRO-3 also pays 1.5x baseline communication where ZeRO-1 and ZeRO-2 pay 1.0x.
 
 Start at `PP=1` and raise pipeline parallelism only when the model genuinely does not fit. A high-PP, high-VP configuration costs bubble time; it is something to justify, not a default. Whether reducing PP wins depends on whether memory has real slack, so check the Phase 1 headroom before recommending it.
 
