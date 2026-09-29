@@ -20,10 +20,10 @@
 | Qwen3-32B | 64 | 5120 | **128** | 64 | 25600 | 0 | 64/8 | 30.5 | 30.5 | 4096 | 1,2,4,8,16,32,64 |
 | Qwen3-30B-A3B | 48 | 2048 | **128** | 0 | 6144 | 768 | 32/4 | 30.53 | 3.35 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
 | Qwen3-235B-A22B | 94 | 4096 | **128** | 0 | 12288 | 1536 | 64/4 | 235.09 | 22.19 | 4096 | 1,2,47,94 |
-| Qwen3.5-27B | 64 | 5120 | **256** | 64 | 17408 | 0 | 24/4 | 24.35 | 24.35 | 4096 | 1,2,4,8,16,32,64 |
-| Qwen3.5-35B-A3B | 40 | 2048 | **256** | 0 | 0 | 512 | 16/2 | 34.13 | 2.93 | 4096 | 1,2,4,5,8,10,20,40 |
-| Qwen3.5-122B-A10B | 48 | 3072 | **256** | 0 | 0 | 1024 | 32/2 | 120.55 | 8.21 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
-| Qwen3.5-397B-A17B | 60 | 4096 | **256** | 0 | 0 | 1024 | 32/2 | 393.74 | 14.74 | 4096 | 1,2,3,4,5,6,10,12,15,20,30,60 |
+| Qwen3.5-27B | 64 | 5120 | **256** | 64 | 17408 | 0 | 24/4 | 26.90 | 26.90 | 4096 | 1,2,4,8,16,32,64 |
+| Qwen3.5-35B-A3B | 40 | 2048 | **256** | 0 | 0 | 512 | 16/2 | 34.66 | 3.45 | 4096 | 1,2,4,5,8,10,20,40 |
+| Qwen3.5-122B-A10B | 48 | 3072 | **256** | 0 | 0 | 1024 | 32/2 | 122.11 | 9.77 | 4096 | 1,2,3,4,6,8,12,16,24,48 |
+| Qwen3.5-397B-A17B | 60 | 4096 | **256** | 0 | 0 | 1024 | 32/2 | 396.35 | 17.35 | 4096 | 1,2,3,4,5,6,10,12,15,20,30,60 |
 | DeepSeek-V3 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
 | DeepSeek-V3.1 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
 | DeepSeek-V3.2 | 61 | 7168 | (56) | 3 | 18432 | 2048 | 128/128 | 671.0 | 36.7 | 4096 | 1,61 |
@@ -39,18 +39,39 @@ So when you write a custom variant, or copy a row from this table into a `--json
 
 All `head_dim` values in the table above are verified against the published `config.json` for each model family, not inferred from the stored parameter counts.
 
-### Qwen3.5 is a hybrid-attention family, and the calculator does not model that
+### Qwen3.5 is a hybrid-attention family, and the calculator now models that
 
-This is the most important limitation in the catalog. `Qwen/Qwen3.5-27B/config.json` declares a **3:1 hybrid attention stack**: `full_attention_interval: 4`, with three Gated DeltaNet `linear_attention` layers for every one `full_attention` layer. Across 64 layers that is **16 full-attention layers and 48 linear-attention layers**, the linear ones carrying their own shapes (`linear_key_head_dim: 128`, `linear_num_key_heads: 16`, `linear_num_value_heads: 48`).
+`Qwen/Qwen3.5-27B/config.json` declares a **3:1 hybrid attention stack**: `full_attention_interval: 4`, with three Gated DeltaNet `linear_attention` layers for every one `full_attention` layer. Across 64 layers that is **16 full-attention layers and 48 linear-attention layers**.
 
-The calculator treats every layer as standard full attention for MEMORY, but no longer for FLOPs:
+Both layer types are now counted from the published configs. A variant carrying `linear_attn_per_layer` charges `layers // full_attention_interval` layers at `attn_per_layer` and the rest at `linear_attn_per_layer`.
 
-1. **Attention memory is still overstated.** `attn_per_layer` is applied to all 64 layers when only 16 have full-attention projections. The overstatement is modest rather than 4x: a linear-attention layer's Gated DeltaNet projections (`linear_num_key_heads` 16 × 128, `linear_num_value_heads` 32-64 × 128) come to roughly **86%** of a full-attention layer, so these layers are not cheap — they are merely cheaper.
-2. **Long-context training time is now correct.** The Phase 3 O(seq_len²) term counts only full-attention layers, via the variant's `full_attention_interval: 4`. It previously applied to every layer, overstating time by 8% at 4K, 54% at 32K and 141% at 128K.
+**A Gated DeltaNet layer is LARGER than a full-attention layer, not smaller:**
 
-Qwen3.5 carries `vocab: 248320` per variant now, so there is no global to adjust. The models are multimodal (`Qwen3_5ForConditionalGeneration`, with a `vision_config`), which this text-only calculator does not account for — so published parameter totals sit above what it computes.
+| Variant | full_attn | GDN | GDN/full |
+|---|---|---|---|
+| Qwen3.5-27B | 104,857,600 | 115,876,064 | **1.105x** |
+| Qwen3.5-35B-A3B | 27,262,976 | 33,718,464 | **1.237x** |
+| Qwen3.5-122B-A10B | 78,643,200 | 88,523,008 | **1.126x** |
+| Qwen3.5-397B-A17B | 104,857,600 | 118,014,208 | **1.125x** |
 
-Treat Qwen3.5 attention **memory** as an upper bound and say so when reporting it. Its **time** estimate is sound.
+Linear attention is cheaper in **time** — O(seq_len) rather than O(seq_len²) — but not in parameters. **An earlier version of this file claimed roughly 86% and called the uniform treatment an overstatement. Both were wrong: it was an understatement.**
+
+The GDN weight set, per transformers' `Qwen3NextGatedDeltaNet`, with `key_dim = linear_num_key_heads * linear_key_head_dim` and `value_dim = linear_num_value_heads * linear_value_head_dim`:
+
+```
+in_proj_qkvz  d * (key_dim*2 + value_dim*2)     q, k, v and the z gate
+in_proj_ba    d * (linear_num_value_heads * 2)  beta and alpha gates
+conv1d        (key_dim*2 + value_dim) * linear_conv_kernel_dim   depthwise causal
+out_proj      value_dim * d
+```
+
+**The full-attention layer was also wrong.** Every Qwen3.5 config sets `attn_output_gate: true`, which makes `q_proj` output `num_attention_heads * head_dim * 2`. The old `attn_per_layer` values omitted the gate and were **1.43x to 1.47x too small**.
+
+With both corrected, all four variants reconcile to within 1% of their published sizes — 26.90 / 34.66 / 122.11 / 396.35 B against 27 / 35 / 122 / 397 B. That reconciliation is what validates the derivation; the old `total_params_B` of 24.35 was internally consistent with both errors, so nothing inside the catalog disagreed with it.
+
+**Long-context training time** is also correct: the Phase 3 O(seq_len²) term counts only full-attention layers, where it previously applied to every layer, overstating time by 8% at 4K, 54% at 32K and 141% at 128K.
+
+Qwen3.5 carries `vocab: 248320` per variant, so there is no global to adjust. The models are multimodal (`Qwen3_5ForConditionalGeneration`, with a `vision_config`: depth 27, hidden 1152), which this text-only calculator does not account for — that is the remaining sub-1% shortfall against published totals. Do **not** close it by inflating text parameters.
 
 Notes on reading this table:
 
@@ -84,8 +105,9 @@ Accepted shapes: a `{"variants": [...]}` wrapper, a bare list `[{...}]`, or a si
 - `tied_embeddings` — `True` when the LM head IS the input embedding matrix, so one table is counted instead of two. Overstates the model by ~12% on a 3B model if missed.
 - `num_experts` (or `n_experts`) — per-variant expert count, else project-level `N_EXPERTS`. Drives routed memory directly, so the global fallback can be wrong by 8x.
 - `topk` — per-variant routing width, else project-level `TOPK`
-- `full_attention_interval` — for a hybrid model interleaving linear attention, 1 full-attention layer per N (Qwen3.5 uses 4). Keeps the O(seq_len²) FLOPs term on full-attention layers only. Omit for uniform attention.
-- `shared_each` — set above 0 to mark a shared-expert MoE
+- `full_attention_interval` — for a hybrid model interleaving linear attention, 1 full-attention layer per N (Qwen3.5 uses 4). Keeps the O(seq_len²) FLOPs term on full-attention layers only, **and** splits attention memory between the two layer types. Omit for uniform attention.
+- `linear_attn_per_layer` — the parameter count of ONE linear-attention layer, used with `full_attention_interval` to charge `layers - layers//interval` layers at this value instead of `attn_per_layer`. Omit for uniform attention, in which case every layer is charged at `attn_per_layer`.
+- `shared_each` — set above 0 to mark a shared-expert MoE. Note a shared expert is **always active** (it processes every token), so it belongs in `active_params_B` alongside `topk * expert_each`. Easy to miss: Qwen3-30B-A3B and Qwen3-235B-A22B both have `shared_each = 0`, so a formula omitting the term still reproduces them exactly.
 - `seq_len` — per-variant context length, else project-level `SEQ_LEN`
 
 **Never provide** — these are computed automatically and supplying them will not help:
