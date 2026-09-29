@@ -61,8 +61,8 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `TOKENS_PER_BATCH` | 4e6 | Target tokens per global batch. |
-| `MAX_TOKENS_PER_BATCH` | 600e6 | Upper limit on batch tokens. |
+| `TOKENS_PER_BATCH` | 4e6 | Llama 3 405B's **ramp-start** batch (arXiv:2407.21783 §3.4.1: *"an initial batch size of 4M tokens"*), not a steady-state target. The priority-0 check that reads it is **unreachable** — 0 of 14,080 configurations hit it — so changing this value does not change which configurations are recommended. To bound the batch, change `MIN_STEPS`/`MAX_STEPS`. |
+| `MAX_TOKENS_PER_BATCH` | 600e6 | **Reference only.** The effective cap is derived per configuration by `compute_max_tokens_per_batch(TOTAL_TOKENS, dp, seq_len)` = `max(TOTAL_TOKENS / MIN_STEPS, dp * seq_len)`. The fixed 600e6 implied 25,000 steps, **8x below** this module's own `MIN_STEPS`, so it never fired; the derived cap fires on 352 configurations. |
 | `MICROS` | `[1, 2, 4, 8, 16]` | Micro batch sizes swept. |
 | `GRAD_ACCUM_VALUES` | `[1, 2, 4, 8]` | Gradient accumulation values swept in Phase 3. `1` is no accumulation, valid and often optimal at large DP. |
 | `OPTIM_BYTES_PER_PARAM` | 12 | fp32 master 4 + fp32 momentum 4 + fp32 variance 4. |
@@ -76,7 +76,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `ATTENTION_FLOPS_FACTOR` | 12 | Factor for the O(seq_len²) attention term. |
 | `FRAGMENTATION_FACTOR` | 1.24 | Caching-allocator overhead. Empirical, 1.15–1.25. **No double-count with the ZeRO-3 transient buffer**, though it multiplies the total including it: the harness reproducing the measured 150 GB pins `zero_strategy=1` at DP=1, where ZeRO-1 and ZeRO-2 are byte-identical and the buffer is 0.00 GB, so the 1.24x was never fitted to it. Worst case had it been a ZeRO-3 run: 2.00 GB of 124.2 GB, 1.6%. |
 | `GPU_MEM_UTILIZATION_THRESHOLD` | 0.92 | Fit target: use at most 92% of GPU memory. |
-| `MIN_STEPS` / `MAX_STEPS` | 200,000 / 1,200,000 | Bounds on acceptable step counts. |
+| `MIN_STEPS` / `MAX_STEPS` | 200,000 / 1,200,000 | Bounds on acceptable step counts, and **the real control on batch size** since the derived cap is computed from `MIN_STEPS`. The band implies a batch window of **12.5M–75.0M tokens**, and both published frontier runs land inside it: Llama 3 405B finishes at 16.0M, DeepSeek-V3 at 62.9M (15360 seqs x 4096, arXiv:2412.19437 §4.2). `MAX_STEPS` is Llama 3's own reported count (*"over 1,200,000 steps"*), and its published 4M→8M→16M ramp reconstructs to 1,154,406 steps — a 3.8% agreement. |
 
 Per-GPU memory constants (`H100_MEM_GB` 80, `H200_MEM_GB` 141, `B200_MEM_GB` 180, `B300_MEM_GB` 268, `GB200_MEM_GB` 186, `A10G_MEM_GB` 24, `L4_MEM_GB` 24, `L40S_MEM_GB` 48) are reference values. Actual memory comes from the hardware entry's `mem_gb`.
 

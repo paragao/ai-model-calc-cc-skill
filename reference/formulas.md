@@ -46,9 +46,44 @@ Static estimates of this kind have historically run low against measured peak re
 
 ## Phase 2: Batch configuration
 
-Sweeps `MICROS` (`[1, 2, 4, 8, 16]`) against the memory fit from Phase 1, targeting `TOKENS_PER_BATCH` (4e6) within `MARGIN` (2%), capped at `MAX_TOKENS_PER_BATCH` (600e6).
+Sweeps `MICROS` (`[1, 2, 4, 8, 16]`) against `GRAD_ACCUM_VALUES`, with
+`global_batch = micro * accum * DP` and `tokens_per_batch = global_batch * seq_len`.
+Each configuration is rated 0 (optimal) to 3 (poor) purely on its implied step
+count, `TOTAL_TOKENS / tokens_per_batch`.
 
-`global_batch = micro * accum * DP`, and `tokens_per_batch = global_batch * seq_len`.
+**It does NOT sweep against Phase 1's memory fit.** That is the single most
+important thing to know about this phase. It has no memory model of its own, so it
+will rate a configuration "reasonable" at a micro batch Phase 1 already found does
+not fit. Pass Phase 1's largest viable micro as `max_viable_micro` and each result
+carries `fits_in_memory`; omit it and the field is `None`, claiming nothing. It is
+a **report, not a filter** — the priority is unchanged either way.
+
+The scale of it, measured on a full run: **304** (variant, hardware) pairs have a
+well-rated configuration that cannot be allocated, and for **216 of those (71%)**
+*no* well-rated configuration fits at all. For example `Llama-3.1-8B | 64 p5` rates
+exactly one configuration, needing micro=16, where Phase 1 found max viable 4.
+Treat Phase 2's output as a shortlist to cross-check against Phase 1, never as a
+memory verdict.
+
+**The `TOKENS_PER_BATCH` target is unreachable.** The rating short-circuits to
+priority 0 when `tokens_per_batch` lands within `MARGIN` (2%) of `TOKENS_PER_BATCH`
+(4e6) or 2x it. Since `tokens_per_batch = dp * micro * accum * seq_len` with
+powers-of-two micros and accums, it cannot land inside a ±2% window on an
+arbitrary absolute number: swept over 22 variants x 32 presets x 5 micros x 4
+accums = 14,080 configurations, **zero** hit either window (distribution
+`{1: 968, 2: 1672, 3: 11440}`). So priority 0 never occurs and the
+`optimal_configs` list is always empty. Left documented rather than "fixed",
+because the three candidate remedies — raise the target, widen `MARGIN`, or replace
+the absolute target with a range check — are not equivalent and the choice depends
+on intent.
+
+**The step bands are exhaustive.** The bounds are contiguous (`MIN_STEPS ==
+LOWER_BOUND_LOW_RANGE == 200k`, and so on) and are tested as **half-open**
+intervals. Tested with strict inequalities on both sides, as earlier versions did,
+the three shared values 200,000 / 300,000 / 800,000 match no band and fall through
+to `"unknown"`.
+
+**The batch cap is derived, not the `600e6` constant** — see `configuration.md`.
 
 ## Phase 3: Training time
 
