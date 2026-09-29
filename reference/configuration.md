@@ -75,7 +75,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `GPU_MEM_UTILIZATION_THRESHOLD` | 0.92 | Fit target: use at most 92% of GPU memory. |
 | `MIN_STEPS` / `MAX_STEPS` | 200,000 / 1,200,000 | Bounds on acceptable step counts. |
 
-Per-GPU memory constants (`H100_MEM_GB` 80, `H200_MEM_GB` 141, `B200_MEM_GB` 180, `B300_MEM_GB` 268, `GB200_MEM_GB` 185, `A10G_MEM_GB` 24, `L4_MEM_GB` 24, `L40S_MEM_GB` 48) are reference values. Actual memory comes from the hardware entry's `mem_gb`.
+Per-GPU memory constants (`H100_MEM_GB` 80, `H200_MEM_GB` 141, `B200_MEM_GB` 180, `B300_MEM_GB` 268, `GB200_MEM_GB` 186, `A10G_MEM_GB` 24, `L4_MEM_GB` 24, `L40S_MEM_GB` 48) are reference values. Actual memory comes from the hardware entry's `mem_gb`.
 
 Note that `EFA_PP_EFFICIENCY` (0.016) is **not** here — it lives in `utils/phase6_pp_comm.py`.
 

@@ -108,11 +108,11 @@ exposed_sends         = 2 * (PP - 1)        # warmup fwd + cooldown bwd
 estimated_pp_time_ms  = exposed_sends * time_per_send_us / 1000
 ```
 
-**Communication type** is decided by `is_inter_node = PP > gpus_per_node`, where `gpus_per_node` is derived from the hardware entry as `gpus / nodes`, falling back to 8 when `nodes` is missing or zero. On GB200 NVL at 4 GPUs per node this means `PP > 4` already crosses the node boundary, where on an 8-per-node platform it would not.
+**Communication type** is decided by `is_inter_node = PP > gpus_per_node`, where `gpus_per_node` is derived from the hardware entry as `gpus / nodes`, falling back to 8 when `nodes` is missing or zero. On a GB200 NVL72 UltraServer all 72 GPUs share one NVLink domain, so `gpus_per_node` is 72 and `PP` up to 72 stays intra-node, where on an 8-per-node platform `PP > 8` would already cross to EFA.
 
 **Effective bandwidth:**
 
-- Intra-node: `intra_node_bw_gbps` directly, for example 1800 GB/s on B300, giving roughly 18 µs per send.
+- Intra-node: `intra_node_bw_gbps` directly, for example 1800 GB/s on B300 and GB200, giving roughly 18 µs per send.
 - Inter-node: `inter_node_bw_gb * EFA_PP_EFFICIENCY`, where `EFA_PP_EFFICIENCY` is 0.016 (in `utils/phase6_pp_comm.py`), because EFA point-to-point engages only one or two of the available NICs. On a 400 GB/s link that is roughly 3.2 GB/s, giving about 5.2 ms per send.
 
 That three-orders-of-magnitude gap between intra-node and inter-node pipeline sends is why `PP` crossing the node boundary is expensive, and why `PP <= 8` is worth preserving where memory allows.

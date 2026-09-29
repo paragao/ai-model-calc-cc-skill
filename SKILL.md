@@ -52,7 +52,7 @@ cd ai-model-calculator && python3 ai_model_calculator.py [FLAGS]
 | `--hardware FILE` | Analyze only the hardware defined in FILE, replacing the built-in presets. |
 | `--hw-name NAME` | Restrict to a single hardware entry by name. |
 | `--report` | Emit a concise markdown summary instead of the full output. |
-| none | Analyze all 22 built-in variants against all 28 built-in hardware presets. |
+| none | Analyze all 22 built-in variants against all 32 built-in hardware presets. |
 
 Running with no flags is a large cross-product. Scope it with `--model` and `--hw-name` unless the user genuinely wants the sweep.
 
@@ -93,7 +93,7 @@ Flag when a result sits close to the memory ceiling. The fragmentation factor is
 
 - GPUs per node is derived from each hardware entry as `gpus / nodes`, and decides whether pipeline (Phase 6) and expert (Phase 5) traffic is priced as intra-node NVLink or inter-node EFA. The two differ by roughly three orders of magnitude per send, so the `nodes` value in a custom hardware file matters a great deal — get it right. If `nodes` is absent or zero, the engine falls back to assuming 8 per node.
 - Activation memory is not divided by TP, which is deliberately conservative.
-- `p6e-gb200`/GB200 NVL is **not** a built-in preset despite appearing in some documentation. Supply it via `--hardware`, with `nodes` set so that `gpus / nodes` is 4.
+- `p6e-gb200`/GB200 NVL72 **is** a built-in preset (`1`, `2`, `4`, `8 p6e-gb200`). A node is one UltraServer -- 72 GPUs in ONE NVLink domain -- so `gpus / nodes` is **72**, not 4. A PP of up to 72 stays on NVLink.
 - Several built-in variants decouple `head_dim` from `d / q_heads` (the Qwen3 and Qwen3.5 MoE models use 128 or 256). When writing a custom variant, set `head_dim` explicitly — letting it default silently halves attention parameters on those architectures. See `reference/models.md`.
 - The four DeepSeek variants use Multi-head Latent Attention, so their stored attention parameters are not reproducible from the generic Q/K/V/O formula. That is expected, not an error.
 
