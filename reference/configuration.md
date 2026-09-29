@@ -74,7 +74,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `NCCL_MEM_BUF` | 6.0 | Base NCCL buffer in GB, including CUDA context. |
 | `NCCL_EP_SCALING_FACTOR` | 1.0 | Extra GB per EP rank beyond the first. |
 | `ATTENTION_FLOPS_FACTOR` | 12 | Factor for the O(seq_len²) attention term. |
-| `FRAGMENTATION_FACTOR` | 1.24 | Caching-allocator overhead. Empirical, 1.15–1.25. Note it multiplies the total **including** the explicit ZeRO-3 transient buffer, while its calibration note claims to cover unmodelled transient buffers; if the calibration run used ZeRO-3 those totals now double-count. The record does not state the stage. |
+| `FRAGMENTATION_FACTOR` | 1.24 | Caching-allocator overhead. Empirical, 1.15–1.25. **No double-count with the ZeRO-3 transient buffer**, though it multiplies the total including it: the harness reproducing the measured 150 GB pins `zero_strategy=1` at DP=1, where ZeRO-1 and ZeRO-2 are byte-identical and the buffer is 0.00 GB, so the 1.24x was never fitted to it. Worst case had it been a ZeRO-3 run: 2.00 GB of 124.2 GB, 1.6%. |
 | `GPU_MEM_UTILIZATION_THRESHOLD` | 0.92 | Fit target: use at most 92% of GPU memory. |
 | `MIN_STEPS` / `MAX_STEPS` | 200,000 / 1,200,000 | Bounds on acceptable step counts. |
 
