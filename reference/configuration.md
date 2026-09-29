@@ -64,14 +64,17 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `TOKENS_PER_BATCH` | 4e6 | Target tokens per global batch. |
 | `MAX_TOKENS_PER_BATCH` | 600e6 | Upper limit on batch tokens. |
 | `MICROS` | `[1, 2, 4, 8, 16]` | Micro batch sizes swept. |
-| `GRAD_ACCUM_VALUES` | `[2, 4, 8]` | Gradient accumulation values swept in Phase 3. |
-| `OPTIM_BYTES` | 6 | 2B momentum + 2B variance + 2B FP32 master weights. |
+| `GRAD_ACCUM_VALUES` | `[1, 2, 4, 8]` | Gradient accumulation values swept in Phase 3. `1` is no accumulation, valid and often optimal at large DP. |
+| `OPTIM_BYTES_PER_PARAM` | 12 | fp32 master 4 + fp32 momentum 4 + fp32 variance 4. |
+| `OPTIM_BYTES` | derived | `OPTIM_BYTES_PER_PARAM / PARAM_BYTES` → 6.0 at BF16, 12.0 at FP8. A **multiplier on parameter memory**, not bytes per parameter, because `model_mem_gb` already carries `PARAM_BYTES`. Hardcoding 6 understated FP8 optimizer memory by 2x. |
+| `ZERO3_MAX_LIVE_PARAMS` | 1e9 | DeepSpeed `stage3_max_live_parameters`, in parameter elements. |
+| `ZERO3_PREFETCH_BUCKET_PARAMS` | 5e8 | DeepSpeed `stage3_prefetch_bucket_size`, in parameter elements. |
 | `EMPIRICAL_ACT_MULTIPLIER` | 12 | Activation memory multiplier per layer. |
 | `SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER` | 0.45 | Reduction from selective checkpointing. |
 | `NCCL_MEM_BUF` | 6.0 | Base NCCL buffer in GB, including CUDA context. |
 | `NCCL_EP_SCALING_FACTOR` | 1.0 | Extra GB per EP rank beyond the first. |
 | `ATTENTION_FLOPS_FACTOR` | 12 | Factor for the O(seq_len²) attention term. |
-| `FRAGMENTATION_FACTOR` | 1.24 | Caching-allocator overhead. Empirical, 1.15–1.25. |
+| `FRAGMENTATION_FACTOR` | 1.24 | Caching-allocator overhead. Empirical, 1.15–1.25. Note it multiplies the total **including** the explicit ZeRO-3 transient buffer, while its calibration note claims to cover unmodelled transient buffers; if the calibration run used ZeRO-3 those totals now double-count. The record does not state the stage. |
 | `GPU_MEM_UTILIZATION_THRESHOLD` | 0.92 | Fit target: use at most 92% of GPU memory. |
 | `MIN_STEPS` / `MAX_STEPS` | 200,000 / 1,200,000 | Bounds on acceptable step counts. |
 
@@ -81,7 +84,7 @@ Note that `EFA_PP_EFFICIENCY` (0.016) is **not** here — it lives in `utils/pha
 
 ## Precision
 
-`PRECISION` selects parameter byte width. Under FP8 the weights and gradients halve but the optimizer states do not, since `OPTIM_BYTES` covers FP32 master weights. Memory savings are therefore well under 50%, and FP8 changes the peak TFLOPS the hardware can deliver as well.
+`PRECISION` selects parameter byte width **and** which `peak_tflops_*` field Phase 3 reads. Under FP8 the weights and gradients halve but the optimizer states do not, because Adam state stays fp32 at 12 bytes per parameter regardless of parameter precision — so memory savings are well under 50%. FP8 throughput is roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, and every preset now carries `peak_tflops_fp8` to reflect that. `g5` is the exception at `0`: A10G is Ampere and has no FP8 tensor cores, so an FP8 run there is refused rather than estimated.
 
 ## Before reporting a result
 

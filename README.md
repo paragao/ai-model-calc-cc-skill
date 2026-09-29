@@ -42,7 +42,7 @@ The skill will ask which of three questions you are really asking — how many i
 
 ## What it covers
 
-Six analysis phases: per-GPU memory across ZeRO stages, batch configuration, training time, ZeRO communication, MoE all-to-all routing, and pipeline send/recv.
+Six analysis phases: per-GPU memory across ZeRO stages including ZeRO-3's transient all-gather buffer, batch configuration, training time at BF16 or FP8 throughput, ZeRO-1/ZeRO-2 communication, ZeRO-3 communication at 1.5x baseline, MoE all-to-all routing, and pipeline send/recv.
 
 22 built-in model variants across Llama 3.1/3.2/3.3, Llama 4, Qwen 2.5/3/3.5 and DeepSeek V3–V4. 32 built-in hardware presets across p5, p5en, p6-b200, p6-b300, p6e-gb200, g5, g6 and g6e. Custom models and clusters are supplied as JSON.
 

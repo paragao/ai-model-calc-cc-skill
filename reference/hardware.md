@@ -2,18 +2,18 @@
 
 ## Built-in presets
 
-28 presets ship in `configuration/hardware_config.py` — each platform below at each of its node counts. Select one with `--hw-name "<nodes> <platform>"`, for example `--hw-name "128 p5en"`.
+32 presets ship in `configuration/hardware_config.py` — each of the 8 platforms below at each of its 4 node counts. Select one with `--hw-name "<nodes> <platform>"`, for example `--hw-name "128 p5en"`.
 
-| Platform | GPUs/node | Mem/GPU | Inter-node GB/s | Intra-node GB/s | Peak BF16 TFLOPS | Node counts |
-|---|---|---|---|---|---|---|
-| p5 | 8 | 80 GB | 400 | 900 | 989 | 64,128,256,512 |
-| p5en | 8 | 141 GB | 400 | 900 | 989 | 64,128,256,512 |
-| p6-b200 | 8 | 180 GB | 400 | 1800 | 2250 | 64,128,256,512 |
-| p6-b300 | 8 | 268 GB | 800 | 1800 | 2250 | 64,128,256,512 |
-| p6e-gb200 | **72** | 186 GB | 3600 | 1800 | 2500 | 1,2,4,8 |
-| g5 | 8 | 24 GB | 12.5 | 64 | 35 | 1,4,8,16 |
-| g6 | 8 | 24 GB | 12.5 | 64 | 121 | 1,4,8,16 |
-| g6e | 8 | 48 GB | 50 | 64 | 366 | 1,4,8,16 |
+| Platform | GPUs/node | Mem/GPU | Inter-node GB/s | Intra-node GB/s | Peak BF16 TFLOPS | Peak FP8 TFLOPS | Node counts |
+|---|---|---|---|---|---|---|---|
+| p5 | 8 | 80 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 |
+| p5en | 8 | 141 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 |
+| p6-b200 | 8 | 180 GB | 400 | 1800 | 2250 | 4500 | 64,128,256,512 |
+| p6-b300 | 8 | 268 GB | 800 | 1800 | 2250 | 4500 | 64,128,256,512 |
+| p6e-gb200 | **72** | 186 GB | 3600 | 1800 | 2500 | 5000 | 1,2,4,8 |
+| g5 | 8 | 24 GB | 12.5 | 64 | 35 | **0 — no FP8** | 1,4,8,16 |
+| g6 | 8 | 24 GB | 12.5 | 64 | 121 | 242 | 1,4,8,16 |
+| g6e | 8 | 48 GB | 50 | 64 | 366 | 733 | 1,4,8,16 |
 
 Bandwidth columns are both in **GB/s** (divide an advertised Gbps figure by 8). BF16 figures are **dense, without sparsity**; intra-node figures are NVLink bidirectional totals.
 
@@ -28,10 +28,6 @@ Instance mapping and interconnect:
 - **g6.48xlarge** / **g6e.48xlarge** — L4 / L40S, PCIe-connected with no NVLink, ENA networking. G6 100 Gbps = 12.5 GB/s, G6e 400 Gbps = 50 GB/s.
 
 The G family is for inference and small-scale fine-tuning, not large distributed training. Its low intra-node bandwidth makes tensor parallelism expensive. These entries assume the `.48xlarge` size (8 GPUs) — smaller sizes have 1 or 4 GPUs and lower network bandwidth, so supply those via `--hardware`.
-
-## GB200 node modelling (superseded)
-
-`p6e-gb200.36xlarge` (GB200 NVL, 185 GB per GPU, 2500 peak BF16 TFLOPS, **4 GPUs per node**) is **not** a preset, despite appearing in some project documentation. Supply it via `--hardware`.
 
 ## GB200 node modelling
 
@@ -57,7 +53,8 @@ Accepted shapes: a `{"hardware": [...]}` wrapper, a bare list `[{...}]`, or a si
 | `mem_gb` | Memory per GPU in GB |
 | `inter_node_bw_gb` | Per-GPU inter-node bandwidth in GB/s, for example EFA |
 | `intra_node_bw_gbps` | Intra-node link bandwidth in GB/s, for example NVLink or PCIe |
-| `peak_tflops_bf16` | Per-GPU peak BF16 TFLOPS |
+| `peak_tflops_bf16` | Per-GPU peak BF16 TFLOPS, dense without sparsity |
+| `peak_tflops_fp8` | Per-GPU peak FP8 TFLOPS, dense without sparsity. Read instead of the BF16 field when `PRECISION = "FP8"`. Set `0` for a GPU with no FP8 tensor cores, such as A10G, which makes an FP8 run refuse rather than silently compute. **Omitting** the field is a different failure and gets a different message. |
 
 **Optional:** `label` is accepted but unused. `gpus_per_node` is **not read** — see the caution above.
 
@@ -75,7 +72,8 @@ Accepted shapes: a `{"hardware": [...]}` wrapper, a bare list `[{...}]`, or a si
       "mem_gb": 141,
       "inter_node_bw_gb": 400,
       "intra_node_bw_gbps": 900,
-      "peak_tflops_bf16": 989
+      "peak_tflops_bf16": 989,
+      "peak_tflops_fp8": 1979
     }
   ]
 }

@@ -8,11 +8,26 @@ Throughout: `d` is hidden dimension, `DP = gpus / (TP * PP * CP)`, and `PARAM_BY
 
 Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
 
-- **Model parameters**: `(attn + FFN + expert + embed) * PARAM_BYTES / (TP * PP) + (ln + router) * PARAM_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Divided further by DP under ZeRO-3.
+- **Model parameters**: `(attn + FFN + expert + embed) * PARAM_BYTES / (TP * PP) + (ln + router) * PARAM_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Under ZeRO-3 the **resident** parameters are sharded too, using the same dense/MoE split as the optimizer below, so experts shard across `DP / EP` rather than full DP. ZeRO-1 and ZeRO-2 keep a full replica on every rank.
   - `expert` is `experts_per_gpu * expert_each`, and `experts_per_gpu` comes from the variant's own `num_experts // EP` when it declares one, falling back to the global `N_EXPERTS // EP` otherwise. The fallback is wrong by 8x for a 16-expert model and 4x for a 512-expert one.
   - `embed` counts **two** tables (input embedding + LM head) by default, or **one** when the variant sets `tied_embeddings: True`, where the LM head IS the input embedding matrix.
+- **ZeRO-3 transient all-gather buffer**: a sharded layer **cannot execute**. DeepSpeed all-gathers each module's full parameters into a transient buffer immediately before running it and frees them after, so real peak exceeds the resident figure:
+
+  ```
+  live_params  = max(largest_unit, min(1e9, largest_unit + 5e8))
+  transient_gb = live_params * PARAM_BYTES / 1e9
+  ```
+
+  The floor is the largest single gathered unit, because that module cannot run without being gathered whole. The two bounds are DeepSpeed's own documented defaults in **parameter elements** — `stage3_max_live_parameters` 1e9 and `stage3_prefetch_bucket_size` 5e8, per [the config reference](https://www.deepspeed.ai/docs/config-json/). They are config knobs, so this models the **default** configuration; lowering them trades memory back for communication.
+
+  - **The largest gathered unit is usually the embedding table, not a transformer layer** — true for 18 of the 22 built-in variants. Llama-3.2-3B's 128256 x 3072 table exceeds any of its 28 layers.
+  - **It does not shrink with DP.** Resident memory is `Psi/Nd` and falls away; the buffer is fixed by the largest module and the config caps. For Llama-3.1-70B it is 2.10 GB at every DP, against resident 2.66 GB at DP=8 and 0.02 GB at DP=1024. Past roughly DP=32 the buffer, not the resident shard, dominates ZeRO-3's parameter footprint.
+
+  Reported as `zero3_transient_gb` in the Phase 1 CSV and as the `AGbuf` console column, blank on ZeRO-1/ZeRO-2 rows. **ZeRO-3 therefore does not always save memory**: at large DP with a small model it can cost more than it saves, and the Phase 1 recommendation says so rather than always advising it.
 - **Gradients**: same size as model parameters per GPU. Sharded under ZeRO-2 and ZeRO-3.
 - **Optimizer states**: split by EP and DP — `model_mem * dense_frac * OPTIM_BYTES / DP + model_mem * moe_frac * OPTIM_BYTES / eff_dp_moe`, where `eff_dp_moe = DP / EP` when `DP > EP`, else `DP`. This models the fact that expert parameters are shared only within the EP group.
+
+  `OPTIM_BYTES` is a **multiplier on parameter memory**, not bytes per parameter — `model_mem` already carries `PARAM_BYTES`. It is derived as `OPTIM_BYTES_PER_PARAM / PARAM_BYTES` so both precisions land on 12 bytes/param, because Adam state stays fp32 regardless of parameter precision. A fixed `OPTIM_BYTES = 6` understated FP8 optimizer memory by 2x.
 - **Activations**, MoE-aware per layer:
   - MoE layers: `seq * micro * (d * 12 + topk * expert_ffn * 2 * PARAM_BYTES)`
   - Dense layers: `seq * micro * d * 12`
@@ -36,7 +51,9 @@ Sweeps `MICROS` (`[1, 2, 4, 8, 16]`) against the memory fit from Phase 1, target
 
 ## Phase 3: Training time
 
-Sweeps `GRAD_ACCUM_VALUES` (`[2, 4, 8]`), deriving global batch and step count from each. Sequence length is per variant, falling back to `SEQ_LEN`.
+Sweeps `GRAD_ACCUM_VALUES` (`[1, 2, 4, 8]`), deriving global batch and step count from each. Sequence length is per variant, falling back to `SEQ_LEN`. The `1` arm means no accumulation, which is valid and often optimal at large DP width; it was previously absent so that arm was never evaluated.
+
+`peak_tflops` is selected by precision — `peak_tflops_bf16` under BF16, `peak_tflops_fp8` under FP8. Earlier versions read the BF16 field unconditionally and no preset defined an FP8 figure, so an FP8 run halved its memory while computing time at BF16 throughput, **overstating FP8 training time by roughly 2x**. `g5` carries `0`, because A10G is Ampere with no FP8 tensor cores, and an FP8 run there is refused rather than estimated.
 
 **FLOPs** — two terms, not just `6ND`:
 
@@ -74,25 +91,61 @@ The bubble inflates compute time multiplicatively; exposed communication is adde
 
 Both use `DP = gpus / (TP * PP * CP)` and the hardware's `inter_node_bw_gb`.
 
-**ZeRO-2 reduce-scatter** — model plus gradients, so twice model memory:
+Each collective moves **one parameter replica per rank**, and the volume does **not** shrink with DP.
+
+**ZeRO-2 reduce-scatter** — the gradients, one replica:
 
 ```
-rs_volume_mb = model_mem_gb * 2 / DP * 1000
-rs_time_ms   = model_mem_gb * 2 / DP / inter_node_bw_gb * 1000
+rs_volume_mb = model_mem_gb * (DP - 1) / DP * 1000
+rs_time_ms   = rs_volume_mb / inter_node_bw_gb
 ```
 
-**ZeRO-1 all-gather** — optimizer states only, not gradients. The factor 3 is `OPTIM_BYTES / PARAM_BYTES = 6 / 2`:
+**ZeRO-1 all-gather** — the updated **parameters**, one replica, not the fp32 optimizer state:
 
 ```
-ag_volume_mb = model_mem_gb * 3 / DP * 1000
+ag_volume_mb = model_mem_gb * (DP - 1) / DP * 1000
 ag_time_ms   = ag_volume_mb / inter_node_bw_gb
 ```
 
-ZeRO-1 moves more bytes per step than ZeRO-2 here (factor 3 against 2) but is rated against lower thresholds, because it communicates once per optimizer step rather than per micro-batch. Overhead ratings are heuristics: ZeRO-2 bands at 2 / 5 / 10 ms, ZeRO-1 at 1.5 / 3 / 7 ms.
+ZeRO-1 and ZeRO-2 move the **same** volume per collective. ZeRO-1 is rated against lower thresholds because it communicates once per optimizer step rather than per micro-batch, not because it moves fewer bytes. Overhead ratings are heuristics: ZeRO-2 bands at 2 / 5 / 10 ms, ZeRO-1 at 1.5 / 3 / 7 ms.
+
+> **Earlier versions of this file were wrong here**, and the engine no longer behaves as they described. They gave ZeRO-2 as `model_mem_gb * 2 / DP` and ZeRO-1 as `model_mem_gb * 3 / DP`, claiming the 3 derived from `OPTIM_BYTES / PARAM_BYTES`.
+>
+> The ZeRO paper ([arXiv:1910.02054v3](https://arxiv.org/abs/1910.02054), sec 7.1 and 7.2.1) states that reduce-scatter and all-gather each move a *total data movement of Psi elements*, so baseline DP incurs 2Psi, and that ZeRO's scatter-reduce plus all-gather total *"Psi+Psi=2Psi, exactly the same as the baseline DP"*. The volume is therefore **independent of GPU count**: a ring collective moves `(DP-1)/DP` of a replica per rank, approaching 1 as DP grows rather than falling.
+>
+> The `/DP` divisor understated ZeRO-1 by 21x and ZeRO-2 by 31x at DP=64. Do not reintroduce it, and do not repeat the related claims that ZeRO-1 has "67% less communication" or that raising DP lowers per-GPU volume.
+
+Per-stage totals per step, from the paper:
+
+| Stage | Total | vs baseline DP |
+|---|---|---|
+| baseline DP | 2Psi | 1.0x |
+| ZeRO-1 | 2Psi | 1.0x |
+| ZeRO-2 | 2Psi | 1.0x |
+| ZeRO-3 | 3Psi | **1.5x** |
+
+## Phase 4.2: ZeRO-3 communication
+
+ZeRO-3 is the only stage that pays **more** than baseline data parallelism. Paper sec 7.2.2 decomposes its 3Psi, and the phase reports the three collectives separately rather than as one lump:
+
+| Collective | Volume |
+|---|---|
+| forward parameter all-gather | Psi |
+| backward parameter all-gather | Psi |
+| gradient reduce-scatter | Psi |
+| **total** | **3Psi, 1.5x baseline at every DP** |
+
+Reporting them apart makes the extra 1.5x attributable: it is the two parameter all-gathers, not a costlier reduce-scatter. `baseline_ratio` is emitted so the figure is checkable.
+
+A widely-cited secondary handbook gives Stage 3 as 6Psi (3x). That is **wrong**; the paper says 3Psi.
 
 ## Phase 5: MoE all-to-all
 
-For MoE models, tokens route to expert-holding GPUs via all-to-all. `FWD_BWD_ROUTING_BUFF_PASSES` is 2, for forward and backward. EP ranks inside one node use NVLink; across nodes, EFA. Dense models report zero.
+For MoE models, tokens route to expert-holding GPUs via all-to-all. An MoE layer performs **two** all-to-alls per direction — a **dispatch** sending tokens to their top-k experts and a **combine** returning the expert outputs — so four per micro-batch once the backward pass is counted. `FWD_BWD_ROUTING_BUFF_PASSES` is 2, for forward and backward. EP ranks inside one node use NVLink; across nodes, EFA. Dense models report zero.
+
+Earlier versions counted one all-to-all per direction, understating MoE routing volume by **2x**: 536.9 MB against 1073.7 MB per layer at 4K tokens, topk=8, d=4096.
+
+`bw_utilization_pct` is **not** achieved bandwidth. Time is computed as `bytes / effective_a2a_bw`, so recovering `bytes / time` returns that same bandwidth and dividing by peak restates `(EP-1)/EP` — it reports 87.5% at EP=8 for every model, platform and batch size. Read it as the modelled ring efficiency.
 
 ## Phase 6: PP SendRecv
 
@@ -103,10 +156,13 @@ activation_size_bytes = micro * seq_len * d * dtype_bytes
 sends_per_microbatch  = 2 * (PP * VP - 1)   if VP > 1   # interleaved
                       = 2 * (PP - 1)        if VP == 1  # standard
 total_sends_per_step  = sends_per_microbatch * num_microbatches
-pipeline_bubble_pct   = (PP - 1) / (num_microbatches * VP) * 100
+pipeline_bubble_pct   = (PP - 1) / (num_microbatches + PP - 1) * 100          if VP == 1
+                      = (PP - 1) / (VP * num_microbatches + PP - 1) * 100     if VP > 1
 exposed_sends         = 2 * (PP - 1)        # warmup fwd + cooldown bwd
 estimated_pp_time_ms  = exposed_sends * time_per_send_us / 1000
 ```
+
+The bubble is the standard GPipe/1F1B form, which includes the fill/drain term. Earlier versions gave `(PP - 1) / (num_microbatches * VP)`, a large-`m` approximation that returns **impossible values** below `m < PP` — 175% at PP=8/m=4, 187.5% at PP=16/m=8. A bubble is a fraction of idle time and cannot exceed 100%, and it feeds the Phase 3 estimate directly as a multiplier, so those values inflated training time. The bounded form gives 63.6% and 65.2%.
 
 **Communication type** is decided by `is_inter_node = PP > gpus_per_node`, where `gpus_per_node` is derived from the hardware entry as `gpus / nodes`, falling back to 8 when `nodes` is missing or zero. On a GB200 NVL72 UltraServer all 72 GPUs share one NVLink domain, so `gpus_per_node` is 72 and `PP` up to 72 stays intra-node, where on an 8-per-node platform `PP > 8` would already cross to EFA.
 
