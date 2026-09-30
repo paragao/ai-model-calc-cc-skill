@@ -68,7 +68,24 @@ Parallelism degrees, token budget, precision and MFU have **no CLI flags**. They
 
 ## What it produces
 
-Console tables plus CSV/JSON exports in the working directory: `phase1_memory_results.csv` and `.json`, `phase2_batch_results.csv`, `phase3_training_results.csv`, `phase4_zero2_comm_results.csv`, `phase4_1_zero1_comm_results.csv`, `phase5_alltoall_comm_results.csv`. Phase 6 is reported inline.
+Console tables plus CSV/JSON exports in the working directory:
+`phase1_memory_results.csv` and `.json`, `phase2_batch_results.csv`,
+`phase3_training_results.csv`, `phase4_zero2_comm_results.csv`,
+`phase4_1_zero1_comm_results.csv`, `phase4_2_zero3_comm_results.csv`,
+`phase5_alltoall_comm_results.csv`. Phase 6 is reported inline.
+
+`phase2_batch_results.csv` carries three columns worth reading carefully.
+`fits_in_memory` is a **tri-state**: `True`, `False`, or **blank** meaning "not
+assessed" because Phase 1 found no viable micro batch for that pair — blank must
+not be rendered as "does not fit". `exceeds_batch_cap` is uniformly `False` in the
+default export, because the pipeline filters capped rows out before writing, so it
+carries information only for a caller that skips that filter.
+
+`steps_absurd` is the **absolute** axis and is independent of `priority`, which is
+purely relative to the pair. **7,260 rows read `priority` 1 ("reasonable") while
+also being `steps_absurd`**, so a report filtered on priority alone keeps
+configurations whose batch is below the entire published envelope. Never fold the
+two together; present `steps_absurd` as its own column.
 
 The six phases:
 
