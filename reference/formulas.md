@@ -188,6 +188,28 @@ total_seconds  = compute_seconds + bubble_seconds + comm_seconds
 
 The bubble inflates compute time multiplicatively; exposed communication is added absolutely. The result reduces exactly to the FLOPs-only estimate when both are zero. Reported as `est_months` with its compute / bubble / comm split and each as a percentage of total, then scaled by `TIME_ESTIMATE_LOW_MULTIPLIER` (0.75) and `TIME_ESTIMATE_HIGH_MULTIPLIER` (1.25) for the range.
 
+### The two relative outputs, `rel_speed` and `efficiency_rating`
+
+Both are relative to the variant's **whole set** of configurations, so neither can be computed while sweeping one config at a time. `calculate_training_metrics` returns `None` for both and `classify_platform_efficiency` fills them in; `generate_training_recommendations` raises on an unclassified config rather than formatting `None`.
+
+```
+rel_speed = slowest_est_months / est_months     # for that variant
+position  = log(rel_speed) / log(slowest / fastest)
+```
+
+`rel_speed` is **how many times faster than the slowest configuration for that variant**, so it is always `>= 1.0` and exactly `1.0` for the slowest config itself. The fastest config's `rel_speed` is therefore the variant's full spread, which ranges from **32.5x** (`Llama-3.1-405B`) to **20,642x** (`Llama-3.2-3B`). Quote it with its anchor named; a bare "20,642x" says nothing.
+
+`efficiency_rating` bands that `position` at **0.80 / 0.60 / 0.40** for ratings 0/1/2, else 3. Empty means never classified, which is **distinct from rating 3** — 3 is the worst real rating.
+
+Two reasons it is a position and not a threshold on `rel_speed`:
+
+- **Comparability.** Per-variant spread differs by 635x across the catalog, so a fixed multiplier means something different for every variant: against a slowest anchor, `rel_speed >= 2.0` is the top few percent of a 32x spread and the bottom few percent of a 20,642x one.
+- **Dead bands.** A slowest anchor makes `rel_speed >= 1.0` by construction, so multiplier bands of the form `>= 2.0 / >= 1.5 / >= 1.0 / else` leave the last one **unreachable** — measured at 0 of 5,084 rows, with 97.8% collapsing into rating 0.
+
+The log scale matters because `est_months` within a variant is spread geometrically as GPU counts double; a linear position puts nearly every config against the fast end. Measured over 5,084 rows the bands land at 26.6% / 36.1% / 21.0% / 16.3%.
+
+Because the rating is a within-variant position, it ranks that variant's alternatives and is **not a cross-variant sort key** — sort on `est_months` for absolute comparisons.
+
 ## Phase 4: ZeRO communication
 
 Both use `DP = gpus / (TP * PP * CP)` and the hardware's `inter_node_bw_gb`.
