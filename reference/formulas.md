@@ -25,15 +25,29 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
   - **It does not shrink with DP.** Resident memory is `Psi/Nd` and falls away; the buffer is fixed by the largest module and the config caps. For Llama-3.1-70B it is 2.10 GB at every DP, against resident 2.66 GB at DP=8 and 0.02 GB at DP=1024. Past roughly DP=32 the buffer, not the resident shard, dominates ZeRO-3's parameter footprint.
 
   Reported as `zero3_transient_gb` in the Phase 1 CSV and as the `AGbuf` console column, blank on ZeRO-1/ZeRO-2 rows. **ZeRO-3 therefore does not always save memory**: at large DP with a small model it can cost more than it saves, and the Phase 1 recommendation says so rather than always advising it.
-- **Gradients**: same size as model parameters per GPU. Sharded under ZeRO-2 and ZeRO-3.
+- **Gradients**: `model_mem * GRAD_BYTES`, sharded under ZeRO-2 and ZeRO-3. `GRAD_BYTES` is a **multiplier on parameter memory**, the same shape as `OPTIM_BYTES`, derived as `GRAD_BYTES_PER_PARAM / PARAM_BYTES` so the product holds at **2 bytes/param at both BF16 and FP8**. Gradients are NOT stored at `PARAM_BYTES`: an FP8 recipe uses FP8 only for the GEMM inputs and reduces gradients in BF16 or higher. Without the multiplier an FP8 run charged 1 byte/param — 1.923 GB on Llama-3.1-8B against the correct 3.846.
 - **Optimizer states**: split by EP and DP — `model_mem * dense_frac * OPTIM_BYTES / DP + model_mem * moe_frac * OPTIM_BYTES / eff_dp_moe`, where `eff_dp_moe = DP / EP` when `DP > EP`, else `DP`. This models the fact that expert parameters are shared only within the EP group.
 
   `OPTIM_BYTES` is a **multiplier on parameter memory**, not bytes per parameter — `model_mem` already carries `PARAM_BYTES`. It is derived as `OPTIM_BYTES_PER_PARAM / PARAM_BYTES` so both precisions land on 12 bytes/param, because Adam state stays fp32 regardless of parameter precision. A fixed `OPTIM_BYTES = 6` understated FP8 optimizer memory by 2x.
+
+  **`moe_frac` is a fraction OF a TP-divided model memory**, so routed expert weights are divided by TP when computing it, and the expert count comes from the variant's own `num_experts` rather than the global `N_EXPERTS / EP`. A shared `resolve_experts_per_gpu` helper supplies both so the two memory functions cannot disagree. Neither is cosmetic: without the TP division the ratio exceeds 1.0 for **any TP > 1** and clamps, zeroing `dense_frac` and pushing all optimizer and ZeRO-3 parameter sharding onto `eff_dp_moe` — measured on Qwen3-235B-A22B at TP=2, reported optimizer memory **rose** from 5.36 to 8.04 GB while TP had halved the weights. The global expert count was wrong for **7 of 11 MoE variants**, overstating Llama-4-Scout's 16 experts 8x and understating Qwen3.5-397B's 512 by 4x.
 - **Activations**, MoE-aware per layer:
   - MoE layers: `seq * micro * (d * 12 + topk * expert_ffn * 2 * PARAM_BYTES)`
   - Dense layers: `seq * micro * d * 12`
   - Both multiplied by `SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER` (0.45).
   - Not divided by TP. This is deliberately conservative.
+  - The two expressions **disagree about precision**: the dense term carries no `PARAM_BYTES` while the expert intermediate does, so activations do not halve at FP8. Known open question, not a setting.
+- **Output logits**: `live_tokens * vocab * LOGITS_BYTES_PER_ELEMENT` (8), a **separate term from activations**, which are per-layer in `d` and never touch `vocab` (128,256–248,320 here). 8 bytes/element covers a bf16 logits tensor plus the fp32 softmax and its gradient.
+
+  Under the default fused-CE assumption `live_tokens` caps at `LOGITS_CHUNK_TOKENS` (1024), because a fused or chunked cross-entropy walks the flattened `micro * seq_len` rows in chunks and keeps only one live. **Above the chunk the term is flat in micro:**
+
+  | `micro` | fused | unfused |
+  |---|---|---|
+  | 1 | 1.05 GB | 4.20 GB |
+  | 8 | 1.05 GB | 33.62 GB |
+  | 16 | 1.05 GB | 67.24 GB |
+
+  Measured over all 10,560 variant × hardware × ZeRO × micro combinations, 3,880 configurations fit fused against 3,252 unfused — the assumption is worth **628 configurations**, so state it when reporting. `LOGITS_CHUNK_TOKENS` is an assumption, not a measured value; real implementations size the chunk from available memory. Set `LOGITS_FUSED_CE = False` for a plain `nn.CrossEntropyLoss` over a materialised tensor. The LM head **weight** gradient is not double-counted — the head's parameters are in `model_mem` already.
 - **VP activation overhead**, when `PP > 1` and `VP > 1`: `(PP - 1) * VP * layers_per_virtual_chunk * avg_act_per_layer`. These are full, non-checkpointed activations for in-flight micro-batches during interleaved 1F1B warmup.
 - **Communication buffers**: `NCCL_MEM_BUF` (6 GB) + `NCCL_EP_SCALING_FACTOR * (EP - 1)` + MoE dispatch + PP send/recv.
   - MoE dispatch: `moe_layers_per_gpu * 2 * micro * seq * d * PARAM_BYTES * (topk / experts_per_gpu)`
