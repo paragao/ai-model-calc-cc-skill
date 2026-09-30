@@ -47,7 +47,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `MFU` | 0.40 | Model FLOPs Utilization, the fraction of peak achieved. 0.35–0.50 is typical. |
 | `TIME_ESTIMATE_LOW_MULTIPLIER` | 0.75 | Optimistic bound. |
 | `TIME_ESTIMATE_HIGH_MULTIPLIER` | 1.25 | Pessimistic bound. |
-| `MARGIN` | 0.02 | Tolerance when matching a target batch size. |
+| `MARGIN` | 0.02 | **No code consumers.** Was the tolerance for the removed target-match check. Kept as public configuration; widening it would **not** revive that check, since an exact `dp * micro * accum * seq_len` product cannot land within any margin of an arbitrary absolute target. |
 
 `MFU` is the single most influential assumption in any training-time estimate. State the value used whenever you report a duration, and say that halving it doubles the answer.
 
@@ -61,7 +61,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `TOKENS_PER_BATCH` | 4e6 | Llama 3 405B's **ramp-start** batch (arXiv:2407.21783 §3.4.1: *"an initial batch size of 4M tokens"*), not a steady-state target. The priority-0 check that reads it is **unreachable** — 0 of 14,080 configurations hit it — so changing this value does not change which configurations are recommended. To bound the batch, change `MIN_STEPS`/`MAX_STEPS`. |
+| `TOKENS_PER_BATCH` | 4e6 | Llama 3 405B's **ramp-start** batch (arXiv:2407.21783 §3.4.1: *"an initial batch size of 4M tokens"*), not a steady-state target. The priority-0 check that used to read it has been **removed** as unreachable. It is now the reference batch for `compute_absurd_step_ceiling`, so **raising it tightens the absurdity floor** (`TOTAL_TOKENS / 4e6` = 3,750,000 steps) and flags more configurations. To bound the batch itself, change `MIN_STEPS`/`MAX_STEPS`. |
 | `MAX_TOKENS_PER_BATCH` | 600e6 | **Reference only.** The effective cap is derived per configuration by `compute_max_tokens_per_batch(TOTAL_TOKENS, dp, seq_len)` = `max(TOTAL_TOKENS / MIN_STEPS, dp * seq_len)`. The fixed 600e6 implied 25,000 steps, **8x below** this module's own `MIN_STEPS`, so it never fired; the derived cap fires on 352 configurations. |
 | `MICROS` | `[1, 2, 4, 8, 16]` | Micro batch sizes swept. |
 | `GRAD_ACCUM_VALUES` | `[1, 2, 4, 8]` | Gradient accumulation values swept in Phase 3. `1` is no accumulation, valid and often optimal at large DP. |

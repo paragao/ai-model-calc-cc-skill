@@ -65,23 +65,67 @@ exactly one configuration, needing micro=16, where Phase 1 found max viable 4.
 Treat Phase 2's output as a shortlist to cross-check against Phase 1, never as a
 memory verdict.
 
-**The `TOKENS_PER_BATCH` target is unreachable.** The rating short-circuits to
-priority 0 when `tokens_per_batch` lands within `MARGIN` (2%) of `TOKENS_PER_BATCH`
-(4e6) or 2x it. Since `tokens_per_batch = dp * micro * accum * seq_len` with
-powers-of-two micros and accums, it cannot land inside a ±2% window on an
-arbitrary absolute number: swept over 22 variants x 32 presets x 5 micros x 4
-accums = 14,080 configurations, **zero** hit either window (distribution
-`{1: 968, 2: 1672, 3: 11440}`). So priority 0 never occurs and the
-`optimal_configs` list is always empty. Left documented rather than "fixed",
-because the three candidate remedies — raise the target, widen `MARGIN`, or replace
-the absolute target with a range check — are not equivalent and the choice depends
-on intent.
+**Step assessment is RELATIVE, not banded.** The absolute step bands and the
+`TOKENS_PER_BATCH` target check are both **removed**. For each (variant, hardware)
+pair the smallest and largest step counts are outliers (priority 3) and the rest
+are reasonable (priority 1); **priority 0 and 2 no longer occur**, and
+`assessment` reads `reasonable`, `outlier (fewest steps)` or
+`outlier (most steps)`.
 
-**The step bands are exhaustive.** The bounds are contiguous (`MIN_STEPS ==
-LOWER_BOUND_LOW_RANGE == 200k`, and so on) and are tested as **half-open**
-intervals. Tested with strict inequalities on both sides, as earlier versions did,
-the three shared values 200,000 / 300,000 / 800,000 match no band and fall through
-to `"unknown"`.
+Why the bands went: the target arm was unreachable, because
+`tokens_per_batch = dp * micro * accum * seq_len` with powers-of-two micros and
+accums cannot land inside a ±2% window on an arbitrary absolute number — **zero of
+14,080** configurations hit it — and the remaining bands condemned **80.8%** of
+configurations as "too many steps" while telling the reader nothing. Stated as a
+cross-tab so the cost is visible with the benefit: **10,076 configurations moved
+from "too many steps" to "reasonable" with nothing about them changed** (reasonable
+7.1% → 87.8%).
+
+Two properties worth knowing:
+- Outliers are dropped **by value**, so every configuration tied at an extreme is
+  marked. Step counts are degenerate — `micro * accum` repeats products, so a
+  pair's 17-20 configurations collapse onto only **6-8 distinct** step values.
+- Fewer than 3 distinct values leaves nothing to trim, so that pair stays wholly
+  reasonable.
+
+The verdict depends on the whole pair, so it cannot be assigned while sweeping:
+`analyze_batch_configuration` returns `assessment=None`/`priority=None` and
+`classify_step_outliers` fills them in. `generate_batch_recommendations` **raises**
+on an unclassified configuration rather than silently matching nothing.
+
+**One absolute floor sits alongside it**, because a relative rule structurally
+cannot flag a pair whose *entire* range is absurd — within such a pair the middle
+values genuinely are the least extreme, so nothing can object.
+`Llama-3.1-8B | 1 g5` spans 28.6M to 3.66B steps and the relative rule calls its
+middle band reasonable.
+
+`compute_absurd_step_ceiling(TOTAL_TOKENS)` = `TOTAL_TOKENS / TOKENS_PER_BATCH` =
+**3,750,000 steps**, and each configuration carries `steps_absurd`. The reference
+is the **smallest batch in published practice**, not a quality target: `4e6` is
+Llama 3 405B's ramp-start batch, the smallest it used at any point before doubling
+to 8M then 16M (arXiv:2407.21783 §3.4.1), and DeepSeek-V3's smallest was larger
+still at 3072 × 4096 = 12.6M (arXiv:2412.19437 §4.2). It is **3.1× looser than
+`MAX_STEPS`**, so it is a credibility floor rather than a reinstated band, and it
+is one-sided — no too-few-steps counterpart, since the derived cap already
+guarantees `steps > MIN_STEPS`.
+
+**The two axes disagree, and that is the point.** `reasonable` means least extreme
+*within its pair* and says nothing about credibility: **7,260 CSV rows read
+priority 1 while also being `steps_absurd`**. Filtering on priority alone keeps
+them.
+
+The pair-level line is deliberately **not** "any absurd configuration in the pair".
+Every grid contains `micro=1, accum=1`, the smallest expressible batch and so the
+most steps, which makes at least one absurd configuration nearly structural at
+**572 of 704 pairs (81%)** — warning there would reproduce the exact failure of the
+bands. It fires only when the pair's **largest reasonable batch** is itself absurd:
+**132** pairs escalate (every configuration absurd), **88** warn, **484** stay
+silent. The 132 are exactly the six small-GPU presets across all 22 variants.
+
+**Now without code consumers**, flagged in place rather than deleted: the four
+`LOWER_`/`UPPER_BOUND_*` constants and `MARGIN`. Widening `MARGIN` would **not**
+revive the removed check, since the product still cannot land on an arbitrary
+absolute target.
 
 **The batch cap is derived, not the `600e6` constant** — see `configuration.md`.
 
