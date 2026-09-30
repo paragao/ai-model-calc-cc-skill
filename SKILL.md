@@ -103,6 +103,8 @@ If a run fails validation, check that `PP` divides the model's `layers` evenly, 
 
 Report the configuration that fits, not just the fastest number. State the ZeRO stage and micro batch size a result depends on — a faster configuration that needs ZeRO-3 is a different operational proposition from one that fits at ZeRO-1.
 
+**`rel_speed` and `efficiency_rating` are within-variant only.** `rel_speed` is times-faster-than-the-slowest-config **for that variant**, so it is always `>= 1.0`, `1.0` marks the worst option, and the fastest row can read 20,642x — never quote it without naming its anchor. `efficiency_rating` is that config's position in its own variant's speed range, so it ranks alternatives for one variant and is **not** a cross-variant sort key; sort on `est_months` for absolute comparisons. A blank rating means "not assessed", never rating 3.
+
 **Do not treat ZeRO-3 as strictly better than ZeRO-2.** It shards resident parameters, but a sharded layer cannot execute, so each module is all-gathered whole into a transient buffer before it runs. That buffer does **not** shrink with DP, so past roughly DP=32 it exceeds the resident shard it replaced, and for a small model at large DP it can cost more memory than the sharding saves. Read the `AGbuf` column, and note ZeRO-3 also pays 1.5x baseline communication where ZeRO-1 and ZeRO-2 pay 1.0x.
 
 Start at `PP=1` and raise pipeline parallelism only when the model genuinely does not fit. A high-PP, high-VP configuration costs bubble time; it is something to justify, not a default. Whether reducing PP wins depends on whether memory has real slack, so check the Phase 1 headroom before recommending it.
