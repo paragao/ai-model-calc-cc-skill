@@ -139,11 +139,32 @@ Sweeps `GRAD_ACCUM_VALUES` (`[1, 2, 4, 8]`), deriving global batch and step coun
 
 ```
 linear_flops    = 6 * TOTAL_TOKENS * active_params_B * 1e9
-attention_flops = ATTENTION_FLOPS_FACTOR * layers * seq_len * TOTAL_TOKENS * d
+attention_flops = ATTENTION_FLOPS_FACTOR * layers * seq_len * TOTAL_TOKENS * attn_flops_dim
 total_flops     = linear_flops + attention_flops
 ```
 
-The factor 6 is one forward plus two backward passes. `ATTENTION_FLOPS_FACTOR` is 12, covering the QK^T and softmax·V matmuls across forward and backward that `6ND` omits. Per sequence that cost is `factor * layers * seq_len² * d`; across `TOTAL_TOKENS / seq_len` sequences it reduces to the form above, which is **linear in `seq_len`**. So at a fixed token budget a 32K-context run costs more attention FLOPs than a 4K one. The term is skipped entirely if any of `layers`, `d`, `seq_len` or the factor is zero.
+The factor 6 is one forward plus two backward passes. `ATTENTION_FLOPS_FACTOR` is 12, covering the QK^T and softmax·V matmuls across forward and backward that `6ND` omits. Per sequence that cost is `factor * layers * seq_len² * W`; across `TOTAL_TOKENS / seq_len` sequences it reduces to the form above, which is **linear in `seq_len`**. So at a fixed token budget a 32K-context run costs more attention FLOPs than a 4K one. The term is skipped entirely if any of `layers`, the width, `seq_len` or the factor is zero.
+
+**`attn_flops_dim` is not `d`.** It is the query-projection width from `compute_attention_flops_dim(variant)`:
+
+```
+W = q_heads * (qk_head_dim + v_head_dim) / 2
+```
+
+Both matmuls are sized by the head widths rather than by the model's hidden dimension: forward costs `2 * s² * q_heads * qk_head_dim` for QK^T plus `2 * s² * q_heads * v_head_dim` for softmax·V, and `ATTENTION_FLOPS_FACTOR = 12` is stated against a single width. `W` reduces to **exactly `d`** whenever `qk_head_dim == v_head_dim == d / q_heads`, so the **12 conforming** catalog variants are unaffected. It differs for the other **10**, from two independent causes:
+
+| cause | variants | understatement using `d` |
+|---|---|---|
+| stored `head_dim` ≠ `d / q_heads` | Qwen3-32B, Qwen3-30B-A3B, Qwen3-235B-A22B, Qwen3.5-27B, Qwen3.5-35B-A3B, Qwen3.5-122B-A10B, Qwen3.5-397B-A17B | 1.20x – 2.67x |
+| **MLA** (qk and v widths differ from each other too) | DeepSeek-V3, V3.1, V3.2 | 2.86x |
+
+For DeepSeek that is `qk_nope_head_dim 128 + qk_rope_head_dim 64 = 192` and `v_head_dim 128` over 128 heads against `d = 7168`, giving `W = 20480`. Using `d` understated those variants' `est_months` by up to **18.4%**.
+
+**GQA is not a cause.** Both matmuls run over `q_heads` regardless of `kv_heads`, because each query head attends with its own (s, s) score matrix — so a GQA model with `head_dim == d / q_heads` is a no-op here.
+
+A variant carrying no head dims falls back to `d / q_heads`, reproducing the old `d` behaviour. That is a **known gap, not a verified value**: it applies to DeepSeek-V4, whose config is unpublished, so its attention FLOPs are very likely understated by about its siblings' factor. Do not close it by copying V3's numbers across.
+
+The **communication models keep `d`**, because they move d-wide activation vectors. Only this FLOPs term uses the query-projection width.
 
 `layers` here is the count of **full-attention** layers, not all layers. A hybrid model declaring `full_attention_interval: N` contributes `layers // N` (Qwen3.5: 16 of 64), because its other layers use linear attention, which is O(seq_len) and is already covered by the `6ND` term. A variant without that field contributes every layer.
 
