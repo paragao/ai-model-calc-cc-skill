@@ -37,6 +37,19 @@ This distinction is load-bearing. The Qwen3 and Qwen3.5 MoE models decouple `hea
 
 So when you write a custom variant, or copy a row from this table into a `--json` file, **carry `head_dim` across explicitly** for any model where it is bold. Omitting it silently produces a 2x error in attention memory, with no warning.
 
+**`head_dim` now also drives the FLOPs term, not just memory.** Phase 3's O(seq_len²) attention term is sized by the query-projection width `q_heads * (qk_head_dim + v_head_dim) / 2`, which falls back to `head_dim` when the two MLA fields are absent. So a wrong or missing `head_dim` on a bold row understates **estimated training time** as well as attention memory — by up to 18.4% on the affected variants. It is the same field with a second consequence, so the advice above has become more load-bearing rather than less.
+
+**MLA needs two extra fields.** DeepSeek's qk and v head widths differ from each other as well as from `d / q_heads`, so `head_dim` alone cannot express them. Set `qk_head_dim` and `v_head_dim` explicitly:
+
+| field | DeepSeek-V3 / V3.1 / V3.2 | from the published config |
+|---|---|---|
+| `qk_head_dim` | `192` | `qk_nope_head_dim 128 + qk_rope_head_dim 64` |
+| `v_head_dim` | `128` | `v_head_dim` |
+
+Over 128 heads against `d = 7168` that gives a width of `20480`, a **2.86x** correction. All three configs were checked individually rather than assumed identical. Leave both unset for MHA/GQA, where the fallback is correct. **DeepSeek-V4 deliberately carries neither** — its config is unpublished, so its attention FLOPs are a known gap rather than a verified value, and copying V3's numbers across would invent data.
+
+**GQA does not affect this width.** Both matmuls run over `q_heads` regardless of `kv_heads`, because each query head attends with its own (s, s) score matrix.
+
 All `head_dim` values in the table above are verified against the published `config.json` for each model family, not inferred from the stored parameter counts.
 
 ### Qwen3.5 is a hybrid-attention family, and the calculator now models that
@@ -100,7 +113,8 @@ Accepted shapes: a `{"variants": [...]}` wrapper, a bare list `[{...}]`, or a si
 
 **Optional:**
 
-- `head_dim` — defaults to `d // q_heads`. **Supply it explicitly for any Qwen3 MoE or Qwen3.5 model**, which decouple it from `d / q_heads` (128 and 256 respectively); the default is 2x low there.
+- `head_dim` — defaults to `d // q_heads`. **Supply it explicitly for any Qwen3 MoE or Qwen3.5 model**, which decouple it from `d / q_heads` (128 and 256 respectively); the default is 2x low there. Drives attention **memory and the O(seq_len²) FLOPs width**, so a wrong value understates estimated training time too.
+- `qk_head_dim` / `v_head_dim` — **MLA only** (DeepSeek: `192` and `128`). Set both when the qk and v head widths differ from each other, which `head_dim` alone cannot express; the FLOPs width is then `q_heads * (qk_head_dim + v_head_dim) / 2`. Omit for MHA/GQA, where the `head_dim` fallback is correct. Omitting them on an MLA model understates its attention FLOPs by 2.86x, silently.
 - `vocab` — per-variant vocabulary, else project-level `VOCAB` (correct for Qwen3 only)
 - `tied_embeddings` — `True` when the LM head IS the input embedding matrix, so one table is counted instead of two. Overstates the model by ~12% on a 3B model if missed.
 - `num_experts` (or `n_experts`) — per-variant expert count, else project-level `N_EXPERTS`. Drives routed memory directly, so the global fallback can be wrong by 8x.
