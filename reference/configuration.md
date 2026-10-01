@@ -24,7 +24,7 @@ These four are fallbacks, not settings to tune per model: a catalogued variant's
 | `PP` | 8 | Pipeline parallelism. Must appear in the variant's `valid_pp`. |
 | `VP` | 4 | Virtual pipeline parallelism, the interleaved schedule. 1 disables it. |
 | `TP` | 1 | Tensor parallelism, splitting within layers. |
-| `CP` | 1 | Context parallelism, splitting the sequence. |
+| `CP` | 1 | Context parallelism, splitting the sequence. **Divides activation memory** as `seq_len / CP`, reaching every sequence-dependent activation term, as well as dividing `DP`. |
 | `EP` | 8 | Expert parallelism. Must divide the expert count evenly. Set 1 for dense. |
 
 **Start at `PP=1`.** The committed default of `PP=8, VP=4` is not a recommendation — it is one configuration among many, and pipeline parallelism buys memory relief at the cost of bubble time. Raise `PP` only when the model genuinely does not fit, and check Phase 1 headroom before concluding it must.
@@ -38,7 +38,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | Parameter | Default | Meaning |
 |---|---|---|
 | `TOTAL_TOKENS` | 15e12 | Dataset size in tokens. |
-| `PRECISION` | `"BF16"` | `"BF16"` or `"FP8"`. |
+| `PRECISION` | `"BF16"` | `"BF16"` or `"FP8"`. **Throughput-only** — it changes no memory term. See the note below the table. |
 
 ### Performance estimation
 
@@ -66,15 +66,17 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | `MICROS` | `[1, 2, 4, 8, 16]` | Micro batch sizes swept. |
 | `GRAD_ACCUM_VALUES` | `[1, 2, 4, 8]` | Gradient accumulation values swept in Phase 3. `1` is no accumulation, valid and often optimal at large DP. |
 | `OPTIM_BYTES_PER_PARAM` | 12 | fp32 master 4 + fp32 momentum 4 + fp32 variance 4. |
-| `OPTIM_BYTES` | derived | `OPTIM_BYTES_PER_PARAM / PARAM_BYTES` → 6.0 at BF16, 12.0 at FP8. A **multiplier on parameter memory**, not bytes per parameter, because `model_mem_gb` already carries `PARAM_BYTES`. Hardcoding 6 understated FP8 optimizer memory by 2x. |
+| `PARAM_STORAGE_BYTES` | 2 | Bytes the weights actually **occupy**, which is NOT `PARAM_BYTES`. `PARAM_BYTES` is a compute precision; weights stay resident in BF16 at either setting. Every memory term uses this. |
+| `OPTIM_BYTES` | derived | `OPTIM_BYTES_PER_PARAM / PARAM_STORAGE_BYTES` → a constant **6.0 at either precision**. A **multiplier on parameter memory**, not bytes per parameter, because `model_mem_gb` carries `PARAM_STORAGE_BYTES`. Dividing by `PARAM_BYTES` instead gives 12.0 at FP8, a **2x overstatement**. |
 | `GRAD_BYTES_PER_PARAM` | 2 | BF16 gradient accumulation and reduction. |
-| `GRAD_BYTES` | derived | `GRAD_BYTES_PER_PARAM / PARAM_BYTES` → 1.0 at BF16, 2.0 at FP8. Also a **multiplier on parameter memory**. Gradients are NOT stored at `PARAM_BYTES`: FP8 is used for the GEMM inputs while gradients reduce in BF16 or higher, so FP8 gradient memory does not halve. Without this an FP8 run charged 1 byte/param — 1.923 GB on Llama-3.1-8B against the correct 3.846. |
+| `GRAD_BYTES` | derived | `GRAD_BYTES_PER_PARAM / PARAM_STORAGE_BYTES` → a constant **1.0 at either precision**. Also a **multiplier on parameter memory**. Gradients are NOT stored at `PARAM_BYTES`: FP8 is used for the GEMM inputs while gradients reduce in BF16 or higher, so FP8 gradient memory does not halve. Without this an FP8 run charged 1 byte/param — 1.923 GB on Llama-3.1-8B against the correct 3.846. |
 | `LOGITS_BYTES_PER_ELEMENT` | 8 | Bytes per logit element: a bf16 logits tensor plus the fp32 softmax and its gradient. Set to 0 to disable the output-logits term. |
 | `LOGITS_FUSED_CE` | `True` | Whether the loss is a fused or chunked cross-entropy, which keeps only one chunk of logits live. `False` charges the full `(micro, seq_len, vocab)` tensor, correct for a plain `nn.CrossEntropyLoss`. Worth **628 configurations** across the sweep, so it is a stated assumption. |
 | `LOGITS_CHUNK_TOKENS` | 1024 | Rows whose logits are live at once under fused CE. **An assumption, not a measured value** — real implementations size the chunk from available memory. Above it the logits term stops scaling with micro. |
 | `ZERO3_MAX_LIVE_PARAMS` | 1e9 | DeepSpeed `stage3_max_live_parameters`, in parameter elements. |
 | `ZERO3_PREFETCH_BUCKET_PARAMS` | 5e8 | DeepSpeed `stage3_prefetch_bucket_size`, in parameter elements. |
-| `EMPIRICAL_ACT_MULTIPLIER` | 12 | Activation memory multiplier per layer. |
+| `EMPIRICAL_ACT_MULTIPLIER` | 12 | Activation memory multiplier per layer. Implicitly **bytes per element** (6 tensors × 2 bytes), since the expression divides by `1e9` with no other byte factor. |
+| `ACT_BYTES_PER_ELEMENT` | 2 | Bytes per element for the MoE expert activation intermediate. Activations are resident in BF16 at either precision, so this replaced a `PARAM_BYTES` factor that made FP8 save 20-40% on MoE activations and exactly 0% on dense ones — not a physical distinction. Scaling the dense term down instead was **measured and refuted**: it moved the predicted FP8/BF16 ratio from 0.9028 to 0.8528 against a measured **1.0873**. |
 | `SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER` | 0.45 | Reduction from selective checkpointing. |
 | `NCCL_MEM_BUF` | 6.0 | Base NCCL buffer in GB, including CUDA context. |
 | `NCCL_EP_SCALING_FACTOR` | 1.0 | Extra GB per EP rank beyond the first. |
@@ -89,7 +91,13 @@ Note that `EFA_PP_EFFICIENCY` (0.016) is **not** here — it lives in `utils/pha
 
 ## Precision
 
-`PRECISION` selects parameter byte width **and** which `peak_tflops_*` field Phase 3 reads. Under FP8 the **weights** halve, but neither the gradients nor the optimizer states do: Adam state stays fp32 at 12 bytes per parameter, and gradients are held at `GRAD_BYTES_PER_PARAM` (2) because FP8 is used only for the GEMM inputs while gradients reduce in BF16 or higher. Activations do not halve either — the dense activation term carries no `PARAM_BYTES` factor. So memory savings are **well** under 50%, and smaller than an earlier version of this file claimed when it said gradients halve. FP8 throughput is roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, and every preset now carries `peak_tflops_fp8` to reflect that. `g5` is the exception at `0`: A10G is Ampere and has no FP8 tensor cores, so an FP8 run there is refused rather than estimated.
+`PRECISION` selects the **compute** (GEMM) precision and which `peak_tflops_*` field Phase 3 reads. It changes **no memory term at all**: a sweep of all 704 variant × hardware pairs is byte-identical between `"BF16"` and `"FP8"`.
+
+An earlier version of this file said "under FP8 the **weights** halve". That is wrong, and wrong in **sign**. On this stack FP8 is requested with `--compute_dtype fp8_cs`, the only precision flag the recipe passes — there is no separate storage or params dtype. Transformer Engine keeps parameters resident in BF16 and *adds* cached FP8 cast copies plus per-tensor scaling factors and amax history. The one controlled measurement available (Llama 70B LoRA finetune, H200 p5en, 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster and container with precision the only difference) has FP8 at **41.1 GB allocated against BF16's 37.8 GB — +8.73%**. FP8 cost *more* memory.
+
+So weights are held at `PARAM_STORAGE_BYTES` (2) regardless, gradients at `GRAD_BYTES_PER_PARAM` (2), optimizer state at fp32 12 bytes/param, and activations at `ACT_BYTES_PER_ELEMENT` (2). **FP8 memory figures are a lower bound**: the cast copies and scaling metadata are not modelled, which is the residual +8.7%.
+
+FP8 throughput is roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, and every preset carries `peak_tflops_fp8` to reflect that. `g5` is the exception at `0`: A10G is Ampere and has no FP8 tensor cores, so an FP8 run there is refused rather than estimated.
 
 ## Before reporting a result
 
