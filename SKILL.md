@@ -111,7 +111,7 @@ Start at `PP=1` and raise pipeline parallelism only when the model genuinely doe
 
 Flag when a result sits close to the memory ceiling. The fragmentation factor is empirical. **Direction of error, measured:** against the one real run available to check (dgxc job 179, BF16 Llama 70B pretrain, TP2/PP4/CP2, 64 GPUs, seq 8192, 108.08 GB reserved) the engine predicts **1.17x** measured reserved at ZeRO-1 and **1.01x** at ZeRO-2, so it runs slightly **high**, not low. An earlier version of this file said static estimates "have run low against measured peak reserved memory"; that came from a hand-done distributed-Adam accounting, not from this engine, and does not describe it. One data point is not a calibration — treat both as a ranking heuristic, not a prediction.
 
-**FP8 figures are a lower bound.** `PRECISION` changes no memory term at all; a BF16 and an FP8 run produce byte-identical Phase 1 tables. Never present FP8 as a memory saving: the FP8 cast copies and scaling metadata are not modelled, and the one controlled measurement has FP8 costing **+8.73%** more than BF16.
+**FP8 figures are a lower bound.** `PRECISION` changes no memory term at all; a BF16 and an FP8 run produce byte-identical Phase 1 tables. Never present FP8 as a memory saving: the FP8 weight cast copies are not modelled, and the one controlled measurement has FP8 costing **+8.73%** more than BF16. Scaling metadata is *not* part of that gap: `fp8_cs` is current scaling, one FP32 scale per tensor with no amax history. The copies themselves are measured at **2.0 bytes/param × `(1 - recompute_fraction)`** and still not applied, because at that measurement's `f=0.50` the term overshoots its delta by **2.67x** — see `reference/configuration.md`.
 
 ## Known caveats
 
