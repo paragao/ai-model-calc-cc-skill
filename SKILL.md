@@ -109,12 +109,14 @@ Report the configuration that fits, not just the fastest number. State the ZeRO 
 
 Start at `PP=1` and raise pipeline parallelism only when the model genuinely does not fit. A high-PP, high-VP configuration costs bubble time; it is something to justify, not a default. Whether reducing PP wins depends on whether memory has real slack, so check the Phase 1 headroom before recommending it.
 
-Flag when a result sits close to the memory ceiling. The fragmentation factor is empirical and static estimates on this stack have run low against measured peak reserved memory.
+Flag when a result sits close to the memory ceiling. The fragmentation factor is empirical. **Direction of error, measured:** against the one real run available to check (dgxc job 179, BF16 Llama 70B pretrain, TP2/PP4/CP2, 64 GPUs, seq 8192, 108.08 GB reserved) the engine predicts **1.17x** measured reserved at ZeRO-1 and **1.01x** at ZeRO-2, so it runs slightly **high**, not low. An earlier version of this file said static estimates "have run low against measured peak reserved memory"; that came from a hand-done distributed-Adam accounting, not from this engine, and does not describe it. One data point is not a calibration — treat both as a ranking heuristic, not a prediction.
+
+**FP8 figures are a lower bound.** `PRECISION` changes no memory term at all; a BF16 and an FP8 run produce byte-identical Phase 1 tables. Never present FP8 as a memory saving: the FP8 cast copies and scaling metadata are not modelled, and the one controlled measurement has FP8 costing **+8.73%** more than BF16.
 
 ## Known caveats
 
 - GPUs per node is derived from each hardware entry as `gpus / nodes`, and decides whether pipeline (Phase 6) and expert (Phase 5) traffic is priced as intra-node NVLink or inter-node EFA. The two differ by roughly three orders of magnitude per send, so the `nodes` value in a custom hardware file matters a great deal — get it right. If `nodes` is absent or zero, the engine falls back to assuming 8 per node.
-- Activation memory is not divided by TP, which is deliberately conservative.
+- Activation memory is not divided by TP, which is deliberately conservative. It **is** divided by `CP`, because context parallelism shards the sequence.
 - `p6e-gb200`/GB200 NVL72 **is** a built-in preset (`1`, `2`, `4`, `8 p6e-gb200`). A node is one UltraServer -- 72 GPUs in ONE NVLink domain -- so `gpus / nodes` is **72**, not 4. A PP of up to 72 stays on NVLink.
 - Several built-in variants decouple `head_dim` from `d / q_heads` (the Qwen3 and Qwen3.5 MoE models use 128 or 256). When writing a custom variant, set `head_dim` explicitly — letting it default silently halves attention parameters on those architectures, **and understates the O(seq_len²) FLOPs term, so estimated training time comes out low too** (up to 18.4% on the affected variants). For **MLA** models the qk and v widths differ from each other as well, so `head_dim` cannot express them: set `qk_head_dim` and `v_head_dim` (DeepSeek: `192` and `128`). See `reference/models.md`.
 - The four DeepSeek variants use Multi-head Latent Attention, so their stored attention parameters are not reproducible from the generic Q/K/V/O formula. That is expected, not an error.

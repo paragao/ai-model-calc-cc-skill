@@ -2,13 +2,13 @@
 
 Every formula here was read from the engine source, not from prose. Use this file to explain a result or sanity-check one that looks wrong.
 
-Throughout: `d` is hidden dimension, `DP = gpus / (TP * PP * CP)`, and `PARAM_BYTES` is 2 under BF16.
+Throughout: `d` is hidden dimension, `DP = gpus / (TP * PP * CP)`, and memory terms use `PARAM_STORAGE_BYTES`, which is **2 at either precision**. `PARAM_BYTES` is a *compute* precision and reaches no memory term.
 
 ## Phase 1: Memory
 
 Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
 
-- **Model parameters**: `(attn + FFN + expert + embed) * PARAM_BYTES / (TP * PP) + (ln + router) * PARAM_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Under ZeRO-3 the **resident** parameters are sharded too, using the same dense/MoE split as the optimizer below, so experts shard across `DP / EP` rather than full DP. ZeRO-1 and ZeRO-2 keep a full replica on every rank.
+- **Model parameters**: `(attn + FFN + expert + embed) * PARAM_STORAGE_BYTES / (TP * PP) + (ln + router) * PARAM_STORAGE_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Under ZeRO-3 the **resident** parameters are sharded too, using the same dense/MoE split as the optimizer below, so experts shard across `DP / EP` rather than full DP. ZeRO-1 and ZeRO-2 keep a full replica on every rank.
   - `expert` is `experts_per_gpu * expert_each`, and `experts_per_gpu` comes from the variant's own `num_experts // EP` when it declares one, falling back to the global `N_EXPERTS // EP` otherwise. The fallback is wrong by 8x for a 16-expert model and 4x for a 512-expert one.
   - `embed` counts **two** tables (input embedding + LM head) by default, or **one** when the variant sets `tied_embeddings: True`, where the LM head IS the input embedding matrix.
   - `attn` is split **by layer type** on a hybrid family. A variant carrying `linear_attn_per_layer` charges `layers_per_gpu // full_attention_interval` layers at `attn_per_layer` and the remainder at `linear_attn_per_layer`. A Gated DeltaNet layer is **1.10x to 1.24x** a full-attention layer, so charging every layer at `attn_per_layer` understates a hybrid model — linear attention is cheaper in time, not in parameters. Without the field every layer is full attention.
@@ -16,7 +16,7 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
 
   ```
   live_params  = max(largest_unit, min(1e9, largest_unit + 5e8))
-  transient_gb = live_params * PARAM_BYTES / 1e9
+  transient_gb = live_params * PARAM_STORAGE_BYTES / 1e9
   ```
 
   The floor is the largest single gathered unit, because that module cannot run without being gathered whole. The two bounds are DeepSpeed's own documented defaults in **parameter elements** — `stage3_max_live_parameters` 1e9 and `stage3_prefetch_bucket_size` 5e8, per [the config reference](https://www.deepspeed.ai/docs/config-json/). They are config knobs, so this models the **default** configuration; lowering them trades memory back for communication.
@@ -25,18 +25,19 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
   - **It does not shrink with DP.** Resident memory is `Psi/Nd` and falls away; the buffer is fixed by the largest module and the config caps. For Llama-3.1-70B it is 2.10 GB at every DP, against resident 2.66 GB at DP=8 and 0.02 GB at DP=1024. Past roughly DP=32 the buffer, not the resident shard, dominates ZeRO-3's parameter footprint.
 
   Reported as `zero3_transient_gb` in the Phase 1 CSV and as the `AGbuf` console column, blank on ZeRO-1/ZeRO-2 rows. **ZeRO-3 therefore does not always save memory**: at large DP with a small model it can cost more than it saves, and the Phase 1 recommendation says so rather than always advising it.
-- **Gradients**: `model_mem * GRAD_BYTES`, sharded under ZeRO-2 and ZeRO-3. `GRAD_BYTES` is a **multiplier on parameter memory**, the same shape as `OPTIM_BYTES`, derived as `GRAD_BYTES_PER_PARAM / PARAM_BYTES` so the product holds at **2 bytes/param at both BF16 and FP8**. Gradients are NOT stored at `PARAM_BYTES`: an FP8 recipe uses FP8 only for the GEMM inputs and reduces gradients in BF16 or higher. Without the multiplier an FP8 run charged 1 byte/param — 1.923 GB on Llama-3.1-8B against the correct 3.846.
+- **Gradients**: `model_mem * GRAD_BYTES`, sharded under ZeRO-2 and ZeRO-3. `GRAD_BYTES` is a **multiplier on parameter memory**, the same shape as `OPTIM_BYTES`, derived as `GRAD_BYTES_PER_PARAM / PARAM_STORAGE_BYTES` — a constant **1.0** — so the product holds at **2 bytes/param at both BF16 and FP8**. Gradients are NOT stored at `PARAM_BYTES`: an FP8 recipe uses FP8 only for the GEMM inputs and reduces gradients in BF16 or higher. Without the multiplier an FP8 run charged 1 byte/param — 1.923 GB on Llama-3.1-8B against the correct 3.846.
 - **Optimizer states**: split by EP and DP — `model_mem * dense_frac * OPTIM_BYTES / DP + model_mem * moe_frac * OPTIM_BYTES / eff_dp_moe`, where `eff_dp_moe = DP / EP` when `DP > EP`, else `DP`. This models the fact that expert parameters are shared only within the EP group.
 
-  `OPTIM_BYTES` is a **multiplier on parameter memory**, not bytes per parameter — `model_mem` already carries `PARAM_BYTES`. It is derived as `OPTIM_BYTES_PER_PARAM / PARAM_BYTES` so both precisions land on 12 bytes/param, because Adam state stays fp32 regardless of parameter precision. A fixed `OPTIM_BYTES = 6` understated FP8 optimizer memory by 2x.
+  `OPTIM_BYTES` is a **multiplier on parameter memory**, not bytes per parameter — `model_mem` carries `PARAM_STORAGE_BYTES`. It is derived as `OPTIM_BYTES_PER_PARAM / PARAM_STORAGE_BYTES`, a constant **6.0**, so both precisions land on 12 bytes/param because Adam state stays fp32 regardless of parameter precision. Dividing by `PARAM_BYTES` instead gives 12.0 at FP8, a **2x overstatement**.
 
   **`moe_frac` is a fraction OF a TP-divided model memory**, so routed expert weights are divided by TP when computing it, and the expert count comes from the variant's own `num_experts` rather than the global `N_EXPERTS / EP`. A shared `resolve_experts_per_gpu` helper supplies both so the two memory functions cannot disagree. Neither is cosmetic: without the TP division the ratio exceeds 1.0 for **any TP > 1** and clamps, zeroing `dense_frac` and pushing all optimizer and ZeRO-3 parameter sharding onto `eff_dp_moe` — measured on Qwen3-235B-A22B at TP=2, reported optimizer memory **rose** from 5.36 to 8.04 GB while TP had halved the weights. The global expert count was wrong for **7 of 11 MoE variants**, overstating Llama-4-Scout's 16 experts 8x and understating Qwen3.5-397B's 512 by 4x.
 - **Activations**, MoE-aware per layer:
-  - MoE layers: `seq * micro * (d * 12 + topk * expert_ffn * 2 * PARAM_BYTES)`
-  - Dense layers: `seq * micro * d * 12`
+  - MoE layers: `(seq / CP) * micro * (d * 12 + topk * expert_ffn * 2 * ACT_BYTES_PER_ELEMENT)`
+  - Dense layers: `(seq / CP) * micro * d * 12`
   - Both multiplied by `SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER` (0.45).
   - Not divided by TP. This is deliberately conservative.
-  - The two expressions **disagree about precision**: the dense term carries no `PARAM_BYTES` while the expert intermediate does, so activations do not halve at FP8. Known open question, not a setting.
+  - **`seq` is divided by CP**, because context parallelism shards the sequence. That one division covers every sequence-dependent activation term. Omitting it leaves CP shrinking only `DP`, which *raises* reported memory as CP rises — the wrong direction. Against the measured dgxc job 179 (BF16 pretrain, TP2/PP4/**CP2**, 64 GPUs, seq 8192, 108.08 GB reserved) the divisor moves the ZeRO-1 prediction from **1.49x to 1.17x** of measured, and ZeRO-2 — the closer analogue of a NeMo distributed optimizer — to **1.01x**.
+  - **Both expressions are precision-invariant.** The expert intermediate takes `ACT_BYTES_PER_ELEMENT` (2), not `PARAM_BYTES`. An earlier version of this file called the dense/expert disagreement a known open question; it is **resolved**, and resolved *against* the intuitive answer — scaling the dense term down by the FP8 GEMM-input share was measured and refuted, moving the predicted FP8/BF16 total ratio from 0.9028 to 0.8528 against a measured **1.0873**.
 - **Output logits**: `live_tokens * vocab * LOGITS_BYTES_PER_ELEMENT` (8), a **separate term from activations**, which are per-layer in `d` and never touch `vocab` (128,256–248,320 here). 8 bytes/element covers a bf16 logits tensor plus the fp32 softmax and its gradient.
 
   Under the default fused-CE assumption `live_tokens` caps at `LOGITS_CHUNK_TOKENS` (1024), because a fused or chunked cross-entropy walks the flattened `micro * seq_len` rows in chunks and keeps only one live. **Above the chunk the term is flat in micro:**
@@ -50,8 +51,8 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
   Measured over all 10,560 variant × hardware × ZeRO × micro combinations, 3,880 configurations fit fused against 3,252 unfused — the assumption is worth **628 configurations**, so state it when reporting. `LOGITS_CHUNK_TOKENS` is an assumption, not a measured value; real implementations size the chunk from available memory. Set `LOGITS_FUSED_CE = False` for a plain `nn.CrossEntropyLoss` over a materialised tensor. The LM head **weight** gradient is not double-counted — the head's parameters are in `model_mem` already.
 - **VP activation overhead**, when `PP > 1` and `VP > 1`: `(PP - 1) * VP * layers_per_virtual_chunk * avg_act_per_layer`. These are full, non-checkpointed activations for in-flight micro-batches during interleaved 1F1B warmup.
 - **Communication buffers**: `NCCL_MEM_BUF` (6 GB) + `NCCL_EP_SCALING_FACTOR * (EP - 1)` + MoE dispatch + PP send/recv.
-  - MoE dispatch: `moe_layers_per_gpu * 2 * micro * seq * d * PARAM_BYTES * (topk / experts_per_gpu)`
-  - PP buffers: `2 * micro * seq * d * PARAM_BYTES`, one send plus one receive for a single micro-batch activation.
+  - MoE dispatch: `moe_layers_per_gpu * 2 * micro * seq * d * PARAM_STORAGE_BYTES * (topk / experts_per_gpu)`
+  - PP buffers: `2 * micro * seq * d * PARAM_STORAGE_BYTES`, one send plus one receive for a single micro-batch activation.
 - **Fragmentation**: the raw total is multiplied by `FRAGMENTATION_FACTOR` (1.24), an empirical PyTorch caching-allocator overhead calibrated against Qwen3-235B on 64 B300 GPUs.
 
 The phase reports the minimum ZeRO stage and maximum micro batch size that fit within `mem_gb * GPU_MEM_UTILIZATION_THRESHOLD` (0.92).
@@ -147,7 +148,7 @@ absolute target.
 
 Sweeps `GRAD_ACCUM_VALUES` (`[1, 2, 4, 8]`), deriving global batch and step count from each. Sequence length is per variant, falling back to `SEQ_LEN`. The `1` arm means no accumulation, which is valid and often optimal at large DP width; it was previously absent so that arm was never evaluated.
 
-`peak_tflops` is selected by precision — `peak_tflops_bf16` under BF16, `peak_tflops_fp8` under FP8. Earlier versions read the BF16 field unconditionally and no preset defined an FP8 figure, so an FP8 run halved its memory while computing time at BF16 throughput, **overstating FP8 training time by roughly 2x**. `g5` carries `0`, because A10G is Ampere with no FP8 tensor cores, and an FP8 run there is refused rather than estimated.
+`peak_tflops` is selected by precision — `peak_tflops_bf16` under BF16, `peak_tflops_fp8` under FP8. Earlier versions read the BF16 field unconditionally and no preset defined an FP8 figure, so an FP8 run halved its memory while computing time at BF16 throughput, **overstating FP8 training time by roughly 2x**. Both halves are now fixed: throughput selects on precision, and the memory halving was removed as wrong in sign. **`PRECISION` is a throughput-only setting** and changes no memory term. `g5` carries `0`, because A10G is Ampere with no FP8 tensor cores, and an FP8 run there is refused rather than estimated.
 
 **FLOPs** — two terms, not just `6ND`:
 
