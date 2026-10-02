@@ -38,7 +38,7 @@ Constraint: the cluster's `gpus` must be divisible by `TP * PP * CP`, or validat
 | Parameter | Default | Meaning |
 |---|---|---|
 | `TOTAL_TOKENS` | 15e12 | Dataset size in tokens. |
-| `PRECISION` | `"BF16"` | `"BF16"` or `"FP8"`. **Throughput-only** — it changes no memory term. See the note below the table. |
+| `PRECISION` | `"BF16"` | `"BF16"` or `"FP8"`. Changes **exactly one memory term**, `activation_gb`, plus the throughput peak. This row previously said "throughput-only — it changes no memory term". See the note below the table. |
 
 ### Performance estimation
 
@@ -94,11 +94,26 @@ Note that `EFA_PP_EFFICIENCY` (0.016) is **not** here — it lives in `utils/pha
 
 ## Precision
 
-`PRECISION` selects the **compute** (GEMM) precision and which `peak_tflops_*` field Phase 3 reads. It changes **no memory term at all**: a sweep of all 704 variant × hardware pairs is byte-identical between `"BF16"` and `"FP8"`.
+`PRECISION` selects the **compute** (GEMM) precision and which `peak_tflops_*` field Phase 3 reads. It changes **exactly one memory term**: `activation_gb`. This note previously said it changed no memory term at all and that a 704-pair sweep was byte-identical between the two settings; that was wrong on activations, and the sweep now differs there and only there.
 
 An earlier version of this file said "under FP8 the **weights** halve". That is wrong, and wrong in **sign**. On this stack FP8 is requested with `--compute_dtype fp8_cs`, the only precision flag the recipe passes — there is no separate storage or params dtype. Transformer Engine keeps parameters resident in BF16 and *adds* cached FP8 cast copies, each carrying ONE FP32 per-tensor scale factor — `fp8_cs` is *current* scaling, so there is **no amax history buffer** and the metadata is negligible. The one controlled measurement available (Llama 70B LoRA finetune, H200 p5en, 32 GPUs, TP=4 PP=2 VP=20 MBS=1, identical cluster and container with precision the only difference) has FP8 at **41.1 GB allocated against BF16's 37.8 GB — +8.73%**. FP8 cost *more* memory.
 
-So weights are held at `PARAM_STORAGE_BYTES` (2) regardless, gradients at `GRAD_BYTES_PER_PARAM` (2), optimizer state at fp32 12 bytes/param, and activations at `ACT_BYTES_PER_ELEMENT` (2). **FP8 memory figures are a lower bound**: the weight cast copies are not modelled, which is the residual +8.7%. Those copies are now **measured** (jobs 350/351, H200, TE 2.9.0, r2 = 1.000000, two independent arms) at **2.0 bytes/param scaled by `(1 - recompute_fraction)`**, falling 1.9998 → 1.4998 → 0.9999 → 0.5000 → 0.0001 as `f` goes 0 → 1, because a recomputed block keeps neither its activations nor its fp8 weight copy. A **frozen** base (LoRA) keeps *both* copies but loses the activation saving entirely, since a frozen weight needs no wgrad and wgrad is what consumes the saved GEMM input. Neither constant is applied: at the controlled pair's `f=0.50` the weight term overshoots its measured +3.300 GB by **2.67x** with no activation saving left to offset it, and the untested cause — pipelined residency — is beyond what a single-GPU probe can measure.
+So weights are held at `PARAM_STORAGE_BYTES` (2) regardless, gradients at `GRAD_BYTES_PER_PARAM` (2) and optimizer state at fp32 12 bytes/param. **Activations are the exception**: the MoE expert intermediate stays at `ACT_BYTES_PER_ELEMENT` (2), but the d-proportional per-layer term falls by `ACT_PRECISION_SAVING_FRACTION` at FP8 — 3.5 of `EMPIRICAL_ACT_MULTIPLIER`'s 12 bytes per element, **29.17%**, scaled by `(1 - recompute_fraction)`.
+
+That activation saving **is applied**, and it is measured twice over. A 1-GPU TE probe gives 3.5000 B/element at r² = 1.000000 with `3.5*(1-f)` scaling across `f` = 0, 0.25, 0.50, 0.75, 1.00 (jobs 348/350). A 2x4 crossed FP8 × recompute design on real Llama-3.1-8B full pretraining (8×H100, TP=1 PP=1 CP=1) then reproduced it, with the saving and its slope fixed from a pre-existing pair and written down *before* the runs:
+
+| layers recomputed | bf16 | fp8_cs | saving | predicted |
+|---|---|---|---|---|
+| 0/32 | 84.604 | 78.698 | **+5.906** | +5.906 |
+| 5/32 | 79.230 | 74.247 | +4.983 | +4.983 |
+| 16/32 | 67.406 | 64.453 | +2.953 | +2.953 |
+| 32/32 | 50.208 | 51.543 | −1.335 | +0.000 |
+
+The 0/32 cell discriminates `(1-f)` scaling (predicting 78.698) from pure additivity (79.621) and lands on 78.698 to three decimals. So FP8 and activation checkpointing are **substitutes**: they compete for the same bytes.
+
+**On the WEIGHT side the FP8 figures remain a lower bound.** The cast copies are measured (jobs 350/351, H200, TE 2.9.0, r² = 1.000000, two independent arms) at **2.0 bytes/param scaled by `(1 - recompute_fraction)`**, falling 1.9998 → 1.4998 → 0.9999 → 0.5000 → 0.0001 as `f` goes 0 → 1, because a recomputed block keeps neither its activations nor its fp8 weight copy. A **frozen** base (LoRA) keeps *both* copies but loses the activation saving entirely, since a frozen weight needs no wgrad and wgrad is what consumes the saved GEMM input — which is why the LoRA pair could never test the activation term. That weight constant is **not** applied: at the pair's `f=0.50` it overshoots its measured +3.300 GB by **2.67x**, and the untested cause, pipelined residency, is beyond what a single-GPU probe can measure.
+
+The 32/32 inversion above is not an activation effect either. With the activation term zeroed it is the **fp8 parameter all-gather buffer**, proven causally by re-running that cell with `fp8_param_gather=false`, which recovered the bf16 transient exactly. It is transient rather than resident, so it is not modelled. Note its sign: *disabling* that feature adds **13.959 GB** of steady memory, so it is worth about +12.6 GB net — "FP8 weight cast copies are not resident" holds *because* fp8 parameter storage nets them out, not structurally.
 
 FP8 throughput is roughly 2x BF16 on H100/H200/B200/B300/GB200, L4 and L40S, and every preset carries `peak_tflops_fp8` to reflect that. `g5` is the exception at `0`: A10G is Ampere and has no FP8 tensor cores, so an FP8 run there is refused rather than estimated.
 
