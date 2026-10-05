@@ -12,10 +12,12 @@ These parameters have **no CLI flags**. To change them you must edit the files. 
 |---|---|---|
 | `VOCAB` | 151,936 | Vocabulary size. **Fallback only** — every built-in carries its own `vocab`. Qwen3 = 151,936, Llama-3.x = 128,256, Llama-4 = 202,048, Qwen2.5 = 152,064, Qwen3.5 = 248,320, DeepSeek = 129,280. |
 | `SEQ_LEN` | 4,096 | Sequence length. Used only when a variant does not set its own `seq_len`. |
-| `TOPK` | 8 | Experts routed per token. **Fallback only** — overridden per variant by `topk`. Llama-4 routes to 1. |
+| `TOPK` | 8 | Experts routed per token. **Fallback only** — overridden per variant by `topk` via `resolve_topk`. Llama-4 Scout and Maverick route to **1** (the global overstated their expert activation and routing buffers 8x) and Qwen3.5-397B-A17B to **10** (understated 1.25x). This row described the override before the engine performed it. |
 | `N_EXPERTS` | 128 | Total experts per MoE layer. **Fallback only** — overridden per variant by `num_experts`. |
 
-These four are fallbacks, not settings to tune per model: a catalogued variant's own value wins, so editing them changes nothing for the built-ins. Set them only when supplying a `--json` variant that omits the fields, or when analyzing **DeepSeek-V4**, the one built-in with no per-variant values (and no public config to verify any).
+These four are fallbacks, not settings to tune per model: a catalogued variant's own value wins, so editing them changes nothing for the built-ins. Set them only when supplying a `--json` variant that omits the fields, or when analyzing **DeepSeek-V4**, the one built-in with no per-variant `vocab`, `num_experts` or `topk` (and no public config to verify any).
+
+For DeepSeek-V4 specifically, two of those three fallbacks are already the right values and are derivable from its own entry: `N_EXPERTS = 384` falls out of its `moe_layer_params` exactly and integrally, `(25,435,963,392 - 66,060,288 - 2,752,512) / 66,060,288 = 384.0`, and `TOPK = 8` follows from its `active_params_B = 49.0` (topk=6 gives 41.64 B, -15.0%; topk=8 gives 49.70 B, +1.4% -- the closest of twelve candidates). The global `N_EXPERTS = 128` understates its expert count 3x, so that one is worth setting; `TOPK = 8` already matches. `VOCAB` is the gap: the global 151,936 is Qwen3's, where DeepSeek uses 129,280, overstating its two embedding tables 17.5%.
 
 ### Parallelism
 
