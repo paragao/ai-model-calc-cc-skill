@@ -10,7 +10,7 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
 
 - **Model parameters**: `(attn + FFN + expert + embed) * PARAM_STORAGE_BYTES / (TP * PP) + (ln + router) * PARAM_STORAGE_BYTES / PP`. TP shards attention projections, FFN matrices, expert weights and embeddings. Layer norm and router weights are small and replicated across the TP group. Under ZeRO-3 the **resident** parameters are sharded too, using the same dense/MoE split as the optimizer below, so experts shard across `DP / EP` rather than full DP. ZeRO-1 and ZeRO-2 keep a full replica on every rank.
   - `expert` is `experts_per_gpu * expert_each`, and `experts_per_gpu` comes from the variant's own `num_experts // EP` when it declares one, falling back to the global `N_EXPERTS // EP` otherwise. The fallback is wrong by 8x for a 16-expert model and 4x for a 512-expert one.
-  - `embed` counts **two** tables (input embedding + LM head) by default, or **one** when the variant sets `tied_embeddings: True`, where the LM head IS the input embedding matrix.
+  - `embed` counts **two** tables (input embedding + LM head) by default (`PP = 1`, the whole model), or **one** when the variant sets `tied_embeddings: True`. Under pipeline parallelism (`PP > 1`) the per-stage figure counts **one** table on the worst-loaded stage: Megatron places the input embedding on stage 0 and the LM head on stage `PP-1`, so each end stage carries exactly one `vocab × d` table and the middle stages carry neither. The default of `PP = 1` is deliberate — a caller reconciling against a published parameter count wants the whole model, not a per-stage figure. An earlier version charged **both** tables on **every** stage, holding the embeddings `PP` times over across the fleet (Llama-3.1-8B summed to 30.77 GB at PP=8 against a true whole-model 16.06).
   - `attn` is split **by layer type** on a hybrid family. A variant carrying `linear_attn_per_layer` charges `layers_per_gpu // full_attention_interval` layers at `attn_per_layer` and the remainder at `linear_attn_per_layer`. A Gated DeltaNet layer is **1.10x to 1.24x** a full-attention layer, so charging every layer at `attn_per_layer` understates a hybrid model — linear attention is cheaper in time, not in parameters. Without the field every layer is full attention.
 - **ZeRO-3 transient all-gather buffer**: a sharded layer **cannot execute**. DeepSpeed all-gathers each module's full parameters into a transient buffer immediately before running it and frees them after, so real peak exceeds the resident figure:
 
@@ -36,7 +36,7 @@ Computed per (variant, hardware, ZeRO stage, micro batch size) combination.
   - Dense layers: `(seq / CP) * micro * d * EMPIRICAL_ACT_MULTIPLIER`
   - `EMPIRICAL_ACT_MULTIPLIER` is `ACT_INTERMEDIATES_PER_ELEMENT * ACT_BYTES_PER_ELEMENT` (**16 × 2 = 32**, measured). It was 6 × 2 = 12, a hand count low by 2.67x: a 4-point recompute-fraction sweep on real Llama-3.1-8B pretraining gives **32.034 B/element** (worst residual 0.0004 GB over a 34.40 GB range) and a micro-batch sweep gives 36.178, with `mbs=4` and `mbs=8` CUDA-OOMing exactly as the pre-registered refutation required. Korthikanti et al.'s selective figure of 34 sits between them. These two lines used to write the literal `12`, which hid that the byte figure governs the dense term as well as the expert one.
   - Both multiplied by `SELECTIVE_ACT_CHECKPOINTING_MULTIPLIER`, now **1.0 (inert)**, **and by the recompute scale**. That multiplier was 0.45 applied unconditionally; with the old multiplier it left the model charging **5.4 effective B/element against a measured 32.03**, low by 5.93x. `resolve_recompute_scale` derives the recomputed fraction as `RECOMPUTE_NUM_LAYERS / (layers_per_gpu / VP)` — not from `RECOMPUTE_NUM_LAYERS` alone — and a recomputed block stores only its own input at `RECOMPUTE_BOUNDARY_BYTES_PER_ELEMENT` (2). The scale is exactly 1.0 by default. Validated on the controlled pair (jobs 1236/1238), whose recipe recomputes 50%: that configuration's activation estimate goes **23.354 → 13.623 GB**, flipping it from exceeding the real run's 19.635 GB non-weight budget to fitting inside.
-  - Not divided by TP. This is deliberately conservative.
+  - **Split by TP** following Korthikanti et al. eq. 2 (`s*b*h*(10 + 24/t + 5as/(h*t))`): 10 of every 34 B/element are replicated on each TP rank and 24 shard, so the activation term scales by `frac + (1 - frac)/TP` with `frac = 10/34`. Exactly 1.0 at `TP=1`, so TP=1 estimates are byte-identical to before; ratios 0.647/0.471/0.382 at TP=2/4/8. This bullet previously read "Not divided by TP. This is deliberately conservative" — that was a modelling gap (TP had a memory cost but no modelled benefit), now fixed. The split magnitude stays the measured `EMPIRICAL_ACT_MULTIPLIER`; only the ratio is imported.
   - **`seq` is divided by CP**, because context parallelism shards the sequence. That one division covers every sequence-dependent activation term. Omitting it leaves CP shrinking only `DP`, which *raises* reported memory as CP rises — the wrong direction. Against the measured dgxc job 179 (BF16 pretrain, TP2/PP4/**CP2**, 64 GPUs, seq 8192, 108.08 GB reserved) the divisor moves the ZeRO-1 prediction from **1.49x to 1.17x** of measured, and ZeRO-2 — the closer analogue of a NeMo distributed optimizer — to **1.01x**.
   - **The two expressions behave the SAME under precision.** Both the expert intermediate and the d-proportional `d * EMPIRICAL_ACT_MULTIPLIER` part fall by `ACT_PRECISION_SAVING_FRACTION` (**5.5 of 32 = 17.19%**) at FP8, scaled by `(1 - recompute_fraction)`. It read 3.5 of 12 = 29.17% until the activation multiplier itself was measured; both numbers moved together and from the same real pretraining pair, so the absolute GB saving is roughly unchanged -- it is the fraction the earlier measurement never licensed. One consequence: the 29.167% symmetric prediction that jobs 376/377 appeared to confirm to +0.34 pp was computed at the old multiplier, where that model's two activation halves happened to be exactly equal. At 32 they are 72.7/27.3 and symmetry under-predicts that pair by 12.3 pp. It still stands because invariance is worse (12.50%), and because the correction moved the pair's predicted total from 24.0 B/element (40.7% low) to 44.0 against 40.45 measured. The expert term still takes `ACT_BYTES_PER_ELEMENT` (2) as its BF16 per-element size; precision enters as a scale on both halves. This bullet previously said the two behave **DIFFERENTLY** and that the expert intermediate "does not scale", and an earlier version said both were precision-invariant and that scaling the dense term down had been "measured and refuted" by moving the predicted FP8/BF16 ratio from 0.9028 to 0.8528 against a measured **1.0873**. That refutation used the **wrong instrument**: the measurement is a Llama-70B **LoRA** run and this model has no LoRA mode, and a frozen base measures the FP8 activation saving at **exactly 0%** against 29.2% trainable. The dense saving is measured on real full pretraining. The expert saving is measured on jobs 376/377 — a controlled bf16/fp8 pair on Qwen3-30B-A3B (100% MoE at 48 layers, 16 GPUs, EP=8, recompute and CUDA graphs off on both arms, resolved configs differing only in precision fields) — at **29.505%**, against 14.583% predicted if the expert half were invariant and 29.167% if it saved at the dense rate, with a refutation threshold of 21.875% recorded before the jobs were submitted. That model was chosen because its two halves are exactly equal in bytes (`d * m` = 2048 × 12 = 24,576 and `topk * e_ffn * 2 * bytes` = 8 × 768 × 2 × 2 = 24,576), so the hypotheses differed by precisely a factor of two. The expert half reuses the dense constant rather than getting its own: `peak - steady` also contains the fp8 parameter all-gather transient, present only on the fp8 arm, so 29.505% is a lower bound and the implied expert figure spans 3.58–5.55 B/element. The sign and order are settled; the magnitude is not.
 - **Output logits**: `live_tokens * vocab * LOGITS_BYTES_PER_ELEMENT` (8), a **separate term from activations**, which are per-layer in `d` and never touch `vocab` (128,256–248,320 here). 8 bytes/element covers a bf16 logits tensor plus the fp32 softmax and its gradient.
@@ -188,21 +188,22 @@ The **communication models keep `d`**, because they move d-wide activation vecto
 
 ```
 achieved_tflops_per_sec = peak_tflops * gpus * MFU * efficiency
-compute_seconds         = total_flops / (achieved_tflops_per_sec * 1e12)
-months                  = compute_seconds / (24 * 3600 * 30.44)
+total_seconds           = total_flops / (achieved_tflops_per_sec * 1e12)
+months                  = total_seconds / (24 * 3600 * 30.44)
 ```
 
-**Overhead on top of ideal compute:**
+**Bubble and comm are ATTRIBUTION, not additions:**
 
 ```
 bf             = min(bubble_fraction, 0.99)
-bubble_seconds = compute_seconds * bf / (1 - bf)
+bubble_seconds = total_seconds * bf          # share of the estimate, not added on top
 steps          = TOTAL_TOKENS / tok_batch
 comm_seconds   = (exposed_comm_ms_per_step / 1000) * steps
-total_seconds  = compute_seconds + bubble_seconds + comm_seconds
+bubble_pct     = bf * 100
+comm_pct       = comm_seconds / total_seconds * 100
 ```
 
-The bubble inflates compute time multiplicatively; exposed communication is added absolutely. The result reduces exactly to the FLOPs-only estimate when both are zero. Reported as `est_months` with its compute / bubble / comm split and each as a percentage of total, then scaled by `TIME_ESTIMATE_LOW_MULTIPLIER` (0.75) and `TIME_ESTIMATE_HIGH_MULTIPLIER` (1.25) for the range.
+**MFU here is END-TO-END.** A measured MFU is achieved-FLOPs over peak across the whole run, so every idle cycle — waiting on a collective, stalled in a pipeline bubble — is **already inside it**. An earlier version added `bubble_seconds` and `comm_seconds` on top of the MFU-derived compute time (`total = compute + compute*bf/(1-bf) + comm`), charging each stall twice and driving the effective MFU to 0.1455 at accum=1 — every estimate 1.22x–2.75x too long. The additions are removed; `bubble_pct` and `comm_pct` are still reported, as attribution of where the MFU shortfall goes, not as additions to the estimate. `efficiency` (ZeRO 1.0 / 0.9 / 0.8) is kept: MFU is calibrated end-to-end at ZeRO-1, and 0.9/0.8 are the incremental cost of ZeRO-2/3's extra collectives. Scaled by `TIME_ESTIMATE_LOW_MULTIPLIER` (0.75) and `TIME_ESTIMATE_HIGH_MULTIPLIER` (1.25) for the range.
 
 ### The two relative outputs, `rel_speed` and `efficiency_rating`
 
@@ -313,3 +314,37 @@ The bubble is the standard GPipe/1F1B form, which includes the fill/drain term. 
 That three-orders-of-magnitude gap between intra-node and inter-node pipeline sends is why `PP` crossing the node boundary is expensive, and why `PP <= 8` is worth preserving where memory allows.
 
 Only warmup and cooldown sends are serialized; the rest overlap with compute, which is why `exposed_sends` is `2 * (PP - 1)` rather than the full total.
+
+
+## Inference sizing (Phase 8)
+
+Serving is different physics from training, in two regimes with different bottlenecks. These functions live in `utils/phase8_inference.py` and need `hbm_bw_gbps` on the hardware dict (peak GPU memory bandwidth, GB/s) — a field training never used.
+
+**KV cache per token** (whole model, before TP):
+
+```
+MHA/GQA:  2 * layers * kv_heads * head_dim * dtype_bytes
+MLA:      layers * (kv_lora_rank + qk_rope_head_dim) * dtype_bytes   # one latent, no factor of 2
+```
+
+MLA (the DeepSeek family) caches a single compressed latent per token, **not** per-head K and V. Applying the GQA formula to DeepSeek-V3's `kv_heads=128` returns 1708 KiB/token against a real **68.6** — a 24.9x over-estimate — because those head counts describe the attention compute shape, not what is stored. Set `kv_lora_rank` (512) and `qk_rope_head_dim` (64) on the V3.x variants. A model that looks like MLA but carries no compression fields, or `kv_cache_unverified: True` (DeepSeek-V4), returns its figure **flagged** rather than quietly computed.
+
+**TTFT (prefill)** — compute-bound, forward only:
+
+```
+flops  = 2 * active_params * prompt_len + (ATTENTION_FLOPS_FACTOR/3) * layers * prompt_len^2 * d
+ttft_ms = flops / (peak_tflops * gpus * PREFILL_MFU(0.45) * 1e12) * 1000
+```
+
+`2N`, not training's `6N`, because there is no backward pass; the attention term is at **half** the training factor for the same reason.
+
+**TPOT (decode)** — memory-bandwidth-bound, peak TFLOPS does **not** enter:
+
+```
+bytes  = active_params * weight_bytes + kv_per_token * context_len * batch
+tpot_ms = bytes / (hbm_bw_gbps * gpus * DECODE_BW_UTILIZATION(0.80) * 1e9) * 1000
+```
+
+Every active weight plus the whole KV cache is read once per output token. MoE decodes cheaply because only active params are read (Qwen3-235B-A22B reads ~22B).
+
+**`size_for_slo`** inverts an SLO into a topology: given TTFT/TPOT/concurrency targets it returns the smallest feasible `(tp, gpus)`, with the binding constraint when nothing fits. Validated against reality — Llama-3.1-70B needs `tp≥4` on H100 80GB (141 GB of BF16 weights), DeepSeek-V3 reports no feasible 8×H100 BF16 topology against its 1342 GB of weights.
