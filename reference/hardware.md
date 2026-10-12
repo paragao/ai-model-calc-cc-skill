@@ -4,18 +4,18 @@
 
 32 presets ship in `configuration/hardware_config.py` — each of the 8 platforms below at each of its 4 node counts. Select one with `--hw-name "<nodes> <platform>"`, for example `--hw-name "128 p5en"`.
 
-| Platform | GPUs/node | Mem/GPU | Inter-node GB/s | Intra-node GB/s | Peak BF16 TFLOPS | Peak FP8 TFLOPS | Node counts |
-|---|---|---|---|---|---|---|---|
-| p5 | 8 | 80 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 |
-| p5en | 8 | 141 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 |
-| p6-b200 | 8 | 180 GB | 400 | 1800 | 2250 | 4500 | 64,128,256,512 |
-| p6-b300 | 8 | 268 GB | 800 | 1800 | 2250 | 4500 | 64,128,256,512 |
-| p6e-gb200 | **72** | 186 GB | 3600 | 1800 | 2500 | 5000 | 1,2,4,8 |
-| g5 | 8 | 24 GB | 12.5 | 64 | 35 | **0 — no FP8** | 1,4,8,16 |
-| g6 | 8 | 24 GB | 12.5 | 64 | 121 | 242 | 1,4,8,16 |
-| g6e | 8 | 48 GB | 50 | 64 | 366 | 733 | 1,4,8,16 |
+| Platform | GPUs/node | Mem/GPU | Inter-node GB/s | Intra-node GB/s | Peak BF16 TFLOPS | Peak FP8 TFLOPS | Node counts | HBM BW GB/s |
+|---|---|---|---|---|---|---|---|---|
+| p5 | 8 | 80 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 | 3350 |
+| p5en | 8 | 141 GB | 400 | 900 | 989 | 1979 | 64,128,256,512 | 4800 |
+| p6-b200 | 8 | 180 GB | 400 | 1800 | 2250 | 4500 | 64,128,256,512 | 8000 |
+| p6-b300 | 8 | 268 GB | 800 | 1800 | 2250 | 4500 | 64,128,256,512 | 8000 |
+| p6e-gb200 | **72** | 186 GB | 3600 | 1800 | 2500 | 5000 | 1,2,4,8 | 8000 |
+| g5 | 8 | 24 GB | 12.5 | 64 | 35 | **0 — no FP8** | 1,4,8,16 | 600 |
+| g6 | 8 | 24 GB | 12.5 | 64 | 121 | 242 | 1,4,8,16 | 300 |
+| g6e | 8 | 48 GB | 50 | 64 | 366 | 733 | 1,4,8,16 | 864 |
 
-Bandwidth columns are both in **GB/s** (divide an advertised Gbps figure by 8). BF16 figures are **dense, without sparsity**; intra-node figures are NVLink bidirectional totals.
+Bandwidth columns are both in **GB/s** (divide an advertised Gbps figure by 8). BF16 figures are **dense, without sparsity**; intra-node figures are NVLink bidirectional totals. The **HBM BW** column (peak GPU memory bandwidth) is read only by inference sizing — decode (TPOT) is memory-bandwidth-bound.
 
 Instance mapping and interconnect:
 
@@ -56,7 +56,7 @@ Accepted shapes: a `{"hardware": [...]}` wrapper, a bare list `[{...}]`, or a si
 | `peak_tflops_bf16` | Per-GPU peak BF16 TFLOPS, dense without sparsity |
 | `peak_tflops_fp8` | Per-GPU peak FP8 TFLOPS, dense without sparsity. Read instead of the BF16 field when `PRECISION = "FP8"`. Set `0` for a GPU with no FP8 tensor cores, such as A10G, which makes an FP8 run refuse rather than silently compute. **Omitting** the field is a different failure and gets a different message. |
 
-**Optional:** `label` is accepted but unused. `gpus_per_node` is **not read** — see the caution above.
+**Optional:** `label` is accepted but unused. `gpus_per_node` is **not read** — see the caution above. `hbm_bw_gbps` (peak GPU memory bandwidth, GB/s) is read **only by inference sizing** — decode/TPOT is memory-bandwidth-bound — so set it when sizing serving (p5 3350, p5en 4800, Blackwell 8000, g5 600, g6 300, g6e 864); omitting it makes inference TPOT return infinite but does not affect training.
 
 **Validation:** `gpus` must be divisible by `TP * PP * CP` from `configuration/project_config.py`, or the run fails.
 
